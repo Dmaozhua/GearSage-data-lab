@@ -1,9 +1,19 @@
-source_authority_levels:
-  - official
-  - trusted_creator_primary
-  - trusted_creator_secondary
-  - community_user
-  - inferred
-
-creator_mapping:
-  "????": trusted_creator_primary
+{
+  "source_authority_levels": [
+    "official",
+    "player_reported_creator",
+    "player_reported_community",
+    "manual_review"
+  ],
+  "source_quote_type_defaults": {
+    "spoken": "player_reported_creator",
+    "subtitle": "player_reported_creator",
+    "description": "player_reported_creator",
+    "title": "player_reported_creator",
+    "page_text": "player_reported_community",
+    "comments": "player_reported_community",
+    "ocr": "player_reported_creator",
+    "manual_note": "manual_review"
+  },
+  "creator_overrides": {}
+}

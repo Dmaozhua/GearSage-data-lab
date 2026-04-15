@@ -33,6 +33,9 @@ Write player_data_extract with one row per:
 - field candidate
 - task_id
 
+Primary entry point:
+- `skills/reel-parameter-extract/scripts/extract_player_fields.py`
+
 # Required behavior
 1. Read raw_ingest rows whose ingest_status is success or partial.
 2. Detect reel entities from title, transcript, subtitles, description_text, and page_text.
@@ -50,6 +53,7 @@ Write player_data_extract with one row per:
    - conflict-prone rows
 11. Never fabricate a value not supported by the source.
 12. If a video mentions multiple reels, write separate rows for each reel and field.
+13. Do not generate rows for missing values just to make the table look complete.
 
 # Confidence policy
 High:

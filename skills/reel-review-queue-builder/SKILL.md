@@ -25,6 +25,9 @@ A workbook with:
 # Output
 Write review_queue with one row per reviewable extracted field.
 
+Primary entry point:
+- `skills/reel-review-queue-builder/scripts/build_review_queue.py`
+
 # Required behavior
 1. Read player_data_extract.
 2. Include rows in review_queue when:
@@ -37,6 +40,7 @@ Write review_queue with one row per reviewable extracted field.
 5. Leave review_action and review_value blank for human editing.
 6. Do not remove existing human review notes unless explicitly rebuilding from scratch.
 7. Keep extract_id and task_id stable for traceability.
+8. Preserve existing human review columns when the same `extract_id` is rebuilt.
 
 # Review action policy
 Allowed review_action values:

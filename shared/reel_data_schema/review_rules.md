@@ -1,12 +1,20 @@
-# Review rules
+# Review Rules
 
-Default include in review_queue when:
-- review_required=yes
-- confidence is medium or low
-- field is numeric or material related
+Rows should enter `review_queue` when any of the following is true:
+- `review_required = yes`
+- `confidence` is `medium` or `low`
+- `field_name` belongs to the numeric field set
+- `field_name` belongs to the material field set
 
-Allowed review_action values:
-- approve
-- reject
-- edit
-- hold
+Human-editable columns that the pipeline must leave alone on rebuild when `extract_id` is unchanged:
+- `review_action`
+- `review_value`
+- `review_comment`
+- `reviewer`
+- `reviewed_at`
+
+Allowed `review_action` values:
+- `approve`
+- `reject`
+- `edit`
+- `hold`

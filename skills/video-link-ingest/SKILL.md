@@ -29,6 +29,9 @@ A workbook with a sheet named input_videos and at least these columns:
 # Output
 Write or update the raw_ingest sheet with one row per task_id.
 
+Primary entry point:
+- `skills/video-link-ingest/scripts/ingest_from_excel.py`
+
 # Required behavior
 1. Read input_videos.
 2. Process rows whose status is pending or failed and explicitly retried.
@@ -40,6 +43,7 @@ Write or update the raw_ingest sheet with one row per task_id.
 8. Never invent titles, dates, or transcript text.
 9. Record ingest method and failure reason in ingest_notes.
 10. Update input_videos.status to ingested, partial, or failed where appropriate.
+11. Keep `ingest_notes` human-readable and preserve blanks for anything not captured.
 
 # Tool preference
 - Primary: excel, filesystem, yt_dlp

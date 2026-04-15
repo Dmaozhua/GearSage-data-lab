@@ -1,0 +1,9 @@
+source_authority_levels:
+  - official
+  - trusted_creator_primary
+  - trusted_creator_secondary
+  - community_user
+  - inferred
+
+creator_mapping:
+  "????": trusted_creator_primary

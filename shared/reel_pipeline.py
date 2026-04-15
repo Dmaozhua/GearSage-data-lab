@@ -1209,12 +1209,16 @@ def run_ingest(
     timeout_seconds: int = 90,
     page_fallback: bool = False,
     ocr_fallback: bool = False,
+    task_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     input_headers, input_rows = read_sheet_rows(workbook_path, "input_videos")
     _, raw_rows = read_sheet_rows(workbook_path, "raw_ingest")
     raw_by_task = records_by_key(raw_rows, "task_id")
     processed: list[dict[str, str]] = []
     for row in input_rows:
+        task_id = row.get("task_id", "").strip()
+        if task_ids is not None and task_id not in task_ids:
+            continue
         status = row.get("status", "").strip().lower()
         if status != "pending":
             continue
@@ -1788,21 +1792,25 @@ def build_extract_row(
     }
 
 
-def run_extract(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
+def run_extract(workbook_path: Path = WORKBOOK_DEFAULT, task_ids: set[str] | None = None) -> dict[str, Any]:
     _, raw_rows = read_sheet_rows(workbook_path, "raw_ingest")
+    _, existing_extract_rows = read_sheet_rows(workbook_path, "player_data_extract")
     field_rules = load_field_rules()
     source_rules = load_source_authority_rules()
     model_map = load_model_normalization()
-    extracted_rows: list[dict[str, str]] = []
+    selected_rows: list[dict[str, str]] = []
     for raw_row in raw_rows:
+        task_id = raw_row.get("task_id", "")
+        if task_ids is not None and task_id not in task_ids:
+            continue
         if not any(
             clean_text(raw_row.get(field_name, ""))
             for field_name in ["title_detected", "subtitle_text", "transcript_text", "description_text", "page_text"]
         ):
             continue
-        extracted_rows.extend(extract_rows_from_record(raw_row, field_rules, source_rules, model_map))
+        selected_rows.extend(extract_rows_from_record(raw_row, field_rules, source_rules, model_map))
     deduped: dict[tuple[str, str, str, str], dict[str, str]] = {}
-    for row in extracted_rows:
+    for row in selected_rows:
         dedupe_key = (
             row.get("task_id", ""),
             row.get("reel_model_normalized", "") or row.get("reel_model_raw", ""),
@@ -1811,14 +1819,22 @@ def run_extract(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
         )
         existing = deduped.get(dedupe_key)
         deduped[dedupe_key] = row if existing is None else choose_better_extract_row(existing, row)
-    extracted_rows = sorted(
+    selected_rows = sorted(
         deduped.values(),
         key=lambda row: (row["task_id"], row["field_name"], row["extract_id"]),
     )
-    write_sheet_rows(workbook_path, "player_data_extract", PLAYER_EXTRACT_HEADERS, extracted_rows)
+    if task_ids is None:
+        final_rows = selected_rows
+    else:
+        preserved_rows = [row for row in existing_extract_rows if row.get("task_id", "") not in task_ids]
+        final_rows = sorted(
+            preserved_rows + selected_rows,
+            key=lambda row: (row["task_id"], row["field_name"], row["extract_id"]),
+        )
+    write_sheet_rows(workbook_path, "player_data_extract", PLAYER_EXTRACT_HEADERS, final_rows)
     return {
-        "extract_count": len(extracted_rows),
-        "task_count": len({row["task_id"] for row in extracted_rows}),
+        "extract_count": len(selected_rows),
+        "task_count": len({row["task_id"] for row in selected_rows}),
     }
 
 
@@ -1871,15 +1887,26 @@ def build_review_rows(
     return review_rows
 
 
-def run_review_queue(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
+def run_review_queue(workbook_path: Path = WORKBOOK_DEFAULT, task_ids: set[str] | None = None) -> dict[str, Any]:
     _, extract_rows = read_sheet_rows(workbook_path, "player_data_extract")
     _, existing_review_rows = read_sheet_rows(workbook_path, "review_queue")
     field_rules = load_field_rules()
-    review_rows = build_review_rows(extract_rows, existing_review_rows, field_rules)
-    write_sheet_rows(workbook_path, "review_queue", REVIEW_QUEUE_HEADERS, review_rows)
+    selected_extract_rows = [
+        row for row in extract_rows if task_ids is None or row.get("task_id", "") in task_ids
+    ]
+    selected_review_rows = build_review_rows(selected_extract_rows, existing_review_rows, field_rules)
+    if task_ids is None:
+        final_review_rows = selected_review_rows
+    else:
+        preserved_review_rows = [row for row in existing_review_rows if row.get("task_id", "") not in task_ids]
+        final_review_rows = sorted(
+            preserved_review_rows + selected_review_rows,
+            key=lambda row: (row.get("task_id", ""), row.get("field_name", ""), row.get("review_id", "")),
+        )
+    write_sheet_rows(workbook_path, "review_queue", REVIEW_QUEUE_HEADERS, final_review_rows)
     return {
-        "review_count": len(review_rows),
-        "task_count": len({row["task_id"] for row in review_rows}),
+        "review_count": len(selected_review_rows),
+        "task_count": len({row["task_id"] for row in selected_review_rows}),
     }
 
 

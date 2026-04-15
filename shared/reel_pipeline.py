@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import zipfile
@@ -17,6 +18,11 @@ FIELD_WHITELIST_PATH = PROJECT_ROOT / "shared" / "reel_data_schema" / "field_whi
 SOURCE_AUTHORITY_PATH = PROJECT_ROOT / "shared" / "reel_data_schema" / "source_authority.yaml"
 MODEL_NORMALIZATION_PATH = PROJECT_ROOT / "shared" / "reel_data_schema" / "model_normalization.yaml"
 CACHE_ROOT = PROJECT_ROOT / "data" / "cache"
+PLAYWRIGHT_NODE_MODULES = PROJECT_ROOT / ".tmp" / "playwright-runner" / "node_modules"
+PLAYWRIGHT_CAPTURE_SCRIPT = (
+    PROJECT_ROOT / "skills" / "video-link-ingest" / "scripts" / "playwright_page_capture.cjs"
+)
+OCR_SCREENSHOT_SCRIPT = PROJECT_ROOT / "skills" / "video-link-ingest" / "scripts" / "ocr_screenshots.swift"
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -145,55 +151,92 @@ MODEL_REGEX = re.compile(
     r"(?i)\b(?:shimano|daiwa|abu garcia|okuma|lew's)\b[^\n,，。;；:：]{0,24}"
 )
 MODEL_REGEX_CN = re.compile(r"(?:禧玛诺|达亿瓦|达瓦|阿布|欧库玛)[^\n,，。;；:：]{0,18}")
+MODEL_REGEX_GENERIC = re.compile(
+    r"\b(?:REVO|METANIUM|ANTARES|CURADO|ALDEBARAN|STEEZ|ZILLION|TATULA|CALDIA|CERTATE|EXIST)\b(?:[ -][A-Z0-9]+){0,3}",
+    re.I,
+)
+URL_REGEX = re.compile(r"https?://[^\s\"'<>]+", re.I)
+ACTIVE_EXTRACT_FIELDS = {
+    "spool_weight_g",
+    "spool_diameter_mm",
+    "spool_width_mm",
+    "spool_axis_type",
+    "body_material",
+    "main_gear_material",
+    "main_gear_size",
+    "minor_gear_material",
+}
 
 NUMERIC_PATTERNS = {
-    "model_year": [
-        (re.compile(r"(?:年款|年份|model year)\s*[:：]?\s*(20\d{2})", re.I), "", "number"),
-    ],
     "spool_diameter_mm": [
-        (re.compile(r"(?:线杯直径|杯径|spool diameter)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*mm", re.I), "mm", "number"),
+        re.compile(r"(?:线杯直径|杯径|spool diameter)\s*[:：]?\s*((\d+(?:\.\d+)?)\s*mm)", re.I),
     ],
     "spool_width_mm": [
-        (re.compile(r"(?:线杯宽度|杯宽|spool width)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*mm", re.I), "mm", "number"),
+        re.compile(r"(?:线杯宽度|杯宽|spool width)\s*[:：]?\s*((\d+(?:\.\d+)?)\s*mm)", re.I),
     ],
     "spool_weight_g": [
-        (re.compile(r"(?:线杯重量|杯重|spool weight)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*g", re.I), "g", "number"),
-    ],
-    "knob_size": [
-        (re.compile(r"(?:握丸尺寸|knob size)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*mm", re.I), "mm", "number"),
-    ],
-    "handle_knob_exchange_size": [
-        (re.compile(r"(?:握丸互换规格|knob exchange size)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*mm", re.I), "mm", "number"),
+        re.compile(r"(?:线杯重量|杯重|spool weight)\s*[:：]?\s*((\d+(?:\.\d+)?)\s*g)", re.I),
     ],
     "main_gear_size": [
-        (re.compile(r"(?:主齿尺寸|main gear size)\s*[:：]?\s*(\d+(?:\.\d+)?)", re.I), "", "number"),
-    ],
-    "market_reference_price": [
-        (re.compile(r"(?:参考价|价格|price)\s*[:：]?\s*(?:rmb|¥|￥)?\s*(\d+(?:\.\d+)?)", re.I), "CNY", "number"),
+        re.compile(
+            r"(?:主齿尺寸|主齿大小|main gear size)\s*[:：]?\s*([A-Za-z0-9.+-]+(?:\s*(?:mm|号))?)",
+            re.I,
+        ),
     ],
 }
 
 MATERIAL_PATTERNS = {
-    "handle_knob_material": re.compile(r"(?:握丸材质|knob material)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
-    "body_material": re.compile(r"(?:机身材质|body material)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
-    "main_gear_material": re.compile(r"(?:主齿材质|main gear material)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
-    "minor_gear_material": re.compile(r"(?:小齿材质|minor gear material)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
+    "body_material": re.compile(
+        r"(?:机身材质|body material)\s*[:：]?\s*(?:[^\s,，。;；:：]{0,8})?(铝合金|铝|镁合金|镁|碳纤维|碳|黄铜|钛合金|钛|不锈钢|钢|锌合金|aluminum|magnesium|carbon fiber|carbon|brass|titanium|stainless steel|steel|zinc alloy)",
+        re.I,
+    ),
+    "main_gear_material": re.compile(
+        r"(?:主齿材质|main gear material)\s*[:：]?\s*(?:[^\s,，。;；:：]{0,8})?(铝合金|铝|镁合金|镁|碳纤维|碳|黄铜|钛合金|钛|不锈钢|钢|锌合金|aluminum|magnesium|carbon fiber|carbon|brass|titanium|stainless steel|steel|zinc alloy)",
+        re.I,
+    ),
+    "minor_gear_material": re.compile(
+        r"(?:小齿材质|minor gear material)\s*[:：]?\s*(?:[^\s,，。;；:：]{0,8})?(铝合金|铝|镁合金|镁|碳纤维|碳|黄铜|钛合金|钛|不锈钢|钢|锌合金|aluminum|magnesium|carbon fiber|carbon|brass|titanium|stainless steel|steel|zinc alloy)",
+        re.I,
+    ),
 }
 
 TEXT_PATTERNS = {
-    "drag_click": re.compile(r"(?:drag click|泄力(?:有|带)?(?:咔嗒|哒哒)|有泄力音)", re.I),
-    "spool_axis_type": re.compile(r"(?:线杯轴|spool axis)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
-    "knob_bearing_spec": re.compile(r"(?:握丸轴承规格|knob bearing)\s*[:：]?\s*([A-Za-z0-9xX* \-/]+)", re.I),
-    "handle_knob_type": re.compile(r"(?:握丸类型|knob type)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 \-/]+)", re.I),
-    "handle_hole_spec": re.compile(r"(?:把手孔位|handle hole spec)\s*[:：]?\s*([A-Za-z0-9xX* \-/]+)", re.I),
-    "player_environment": re.compile(r"(?:使用环境|适合环境|player environment)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 ，,/\-]+)", re.I),
-    "player_positioning": re.compile(r"(?:定位|player positioning)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 ，,/\-]+)", re.I),
-    "player_selling_points": re.compile(r"(?:卖点|selling point[s]?)\s*[:：]?\s*([A-Za-z\u4e00-\u9fff0-9 ，,/\-]+)", re.I),
+    "spool_axis_type": re.compile(r"(?:线杯轴|轴型|spool axis)\s*[:：]?\s*(长轴|短轴)", re.I),
 }
 
-BOOLEAN_PATTERNS = {
-    "is_handle_double": re.compile(r"(?:双摇臂|双把|double handle)", re.I),
-}
+MATERIAL_VALUE_REGEX = (
+    r"(铝合金|铝|镁合金|镁|碳纤维|碳|黄铜|钛合金|钛|不锈钢|钢|锌合金|"
+    r"aluminum|magnesium|carbon fiber|carbon|brass|titanium|stainless steel|steel|zinc alloy)"
+)
+
+NATURAL_BODY_MATERIAL_PATTERNS = [
+    re.compile(rf"(?:机身(?:材质)?|body)\s*(?:为|是|采用)\s*{MATERIAL_VALUE_REGEX}", re.I),
+    re.compile(rf"(?:三大件)\s*(?:为|是|采用)\s*{MATERIAL_VALUE_REGEX}", re.I),
+]
+
+NATURAL_SHARED_GEAR_MATERIAL_PATTERNS = [
+    re.compile(
+        rf"(?:大齿、小齿(?:和主轴)?|大齿和小齿(?:及主轴)?|大齿、小齿及主轴)\s*(?:为|是|采用)\s*{MATERIAL_VALUE_REGEX}",
+        re.I,
+    ),
+]
+
+NATURAL_MAIN_GEAR_MATERIAL_PATTERNS = [
+    re.compile(rf"(?:大齿|主齿)(?:材质)?\s*(?:为|是|采用)\s*{MATERIAL_VALUE_REGEX}", re.I),
+]
+
+NATURAL_MINOR_GEAR_MATERIAL_PATTERNS = [
+    re.compile(rf"(?:小齿)(?:材质)?\s*(?:为|是|采用)\s*{MATERIAL_VALUE_REGEX}", re.I),
+]
+
+NATURAL_SPOOL_AXIS_PATTERNS = [
+    {
+        "regex": re.compile(r"(假长轴结构)", re.I),
+        "normalized": "长轴",
+        "confidence": "low",
+        "extract_notes": "Conservative mapping from natural-language phrase '假长轴结构'.",
+    }
+]
 
 TYPE_PATTERNS = [
     (re.compile(r"(?:纺车|spinning)", re.I), "spinning"),
@@ -461,8 +504,16 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+def to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", to_text(value)).strip()
 
 
 def clean_multiline_text(value: str) -> str:
@@ -524,10 +575,373 @@ def yt_dlp_binary() -> str:
     return "yt-dlp"
 
 
-def fetch_video_assets(task_row: dict[str, str], cache_root: Path = CACHE_ROOT) -> dict[str, str]:
+def extract_first_url(value: str) -> str:
+    match = URL_REGEX.search(value or "")
+    return match.group(0).rstrip(".,);]") if match else ""
+
+
+def resolve_cookie_options(
+    cookies_file: str = "",
+    cookies_from_browser: str = "",
+) -> tuple[str, str]:
+    resolved_file = clean_text(cookies_file) or clean_text(os.getenv("GEARSAGE_YTDLP_COOKIES_FILE", ""))
+    resolved_browser = clean_text(cookies_from_browser) or clean_text(
+        os.getenv("GEARSAGE_YTDLP_COOKIES_FROM_BROWSER", "")
+    )
+    return resolved_file, resolved_browser
+
+
+def ingest_status_from_capture(
+    fetched_title: bool,
+    fetched_creator: bool,
+    fetched_publish_date: bool,
+    fetched_description: bool,
+    fetched_subtitle: bool,
+    fetched_transcript: bool,
+) -> str:
+    if fetched_transcript:
+        return "transcript_available"
+    if fetched_subtitle:
+        return "subtitle_available"
+    if fetched_description:
+        return "description_only"
+    if fetched_title or fetched_creator or fetched_publish_date:
+        return "metadata_only"
+    return "asset_fetch_failed"
+
+
+def summarize_missing_fields(payload: dict[str, str]) -> list[str]:
+    tracked_fields = [
+        "title_detected",
+        "creator_detected",
+        "publish_date",
+        "description_text",
+        "subtitle_text",
+        "transcript_text",
+    ]
+    return [field_name for field_name in tracked_fields if not clean_text(payload.get(field_name, ""))]
+
+
+def detect_platform_block_reason(stderr_text: str, stdout_text: str, timed_out: bool) -> str:
+    combined = f"{stderr_text} {stdout_text}".lower()
+    if timed_out:
+        return "request_timeout"
+    if "fresh cookies" in combined or "cookies are needed" in combined:
+        return "fresh_cookies_required"
+    if "--cookies-from-browser" in combined and ("could not" in combined or "failed" in combined):
+        return "cookies_browser_unavailable"
+    if "failed to parse json" in combined:
+        return "platform_json_parse_failed"
+    if "unsupported url" in combined or "unsupported url" in combined:
+        return "unsupported_url"
+    return ""
+
+
+def cookies_mode_label(cookies_file_value: str, cookies_browser_value: str) -> str:
+    if cookies_file_value:
+        return "cookies_file"
+    if cookies_browser_value:
+        return f"cookies_from_browser:{cookies_browser_value}"
+    return "none"
+
+
+def build_ingest_diagnostic_note(
+    *,
+    metadata_present: bool,
+    description_present: bool,
+    subtitle_present: bool,
+    transcript_present: bool,
+    cookies_mode: str,
+    platform_block_reason: str,
+) -> str:
+    return (
+        "diag:"
+        f"metadata_present={'yes' if metadata_present else 'no'}|"
+        f"description_present={'yes' if description_present else 'no'}|"
+        f"subtitle_present={'yes' if subtitle_present else 'no'}|"
+        f"transcript_present={'yes' if transcript_present else 'no'}|"
+        f"cookies_mode={cookies_mode or 'none'}|"
+        f"platform_block_reason={platform_block_reason or 'none'}"
+    )
+
+
+def build_playwright_note(
+    *,
+    opened: bool,
+    expand_clicked: bool,
+    screenshot_count: int,
+    page_text_present: bool,
+    description_present: bool,
+) -> str:
+    return (
+        "playwright:"
+        f"opened={'yes' if opened else 'no'}|"
+        f"expand_clicked={'yes' if expand_clicked else 'no'}|"
+        f"screenshot_count={screenshot_count}|"
+        f"description_present={'yes' if description_present else 'no'}|"
+        f"page_text_present={'yes' if page_text_present else 'no'}"
+    )
+
+
+def build_ocr_note(*, extracted: bool, char_count: int) -> str:
+    return f"ocr:extracted={'yes' if extracted else 'no'}|char_count={char_count}"
+
+
+def page_fallback_status(payload: dict[str, str]) -> str:
+    if clean_text(payload.get("transcript_text", "")):
+        return "transcript_available"
+    if clean_text(payload.get("subtitle_text", "")):
+        return "subtitle_available"
+    if clean_text(payload.get("description_text", "")) and "playwright_page" in payload.get("ingest_method", ""):
+        return "page_fallback_available"
+    if clean_text(payload.get("page_text", "")) and "playwright_page" in payload.get("ingest_method", ""):
+        return "page_fallback_available"
+    if clean_text(payload.get("description_text", "")):
+        return "description_only"
+    if any(
+        clean_text(payload.get(field_name, ""))
+        for field_name in ["title_detected", "creator_detected", "publish_date"]
+    ):
+        return "metadata_only"
+    return "asset_fetch_failed"
+
+
+def run_ocr_on_screenshots(screenshot_dir: str, timeout_seconds: int = 90) -> dict[str, Any]:
+    screenshot_root = Path(screenshot_dir)
+    if not screenshot_root.exists():
+        return {"items": [], "combined_text": "", "char_count": 0, "notes": ["ocr screenshot directory missing"]}
+    if not OCR_SCREENSHOT_SCRIPT.exists():
+        return {"items": [], "combined_text": "", "char_count": 0, "notes": ["ocr screenshot script missing"]}
+    screenshot_paths = [str(path) for path in sorted(screenshot_root.glob("*.png"))]
+    if not screenshot_paths:
+        return {"items": [], "combined_text": "", "char_count": 0, "notes": ["no screenshots found for ocr"]}
+
+    command = ["swift", str(OCR_SCREENSHOT_SCRIPT), *screenshot_paths]
+    try:
+        process = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return {"items": [], "combined_text": "", "char_count": 0, "notes": [f"ocr timeout after {timeout_seconds}s"]}
+
+    if process.returncode != 0:
+        return {
+            "items": [],
+            "combined_text": "",
+            "char_count": 0,
+            "notes": [clean_text(process.stderr) or "ocr failed"],
+        }
+
+    try:
+        items = json.loads(process.stdout or "[]")
+    except json.JSONDecodeError:
+        return {"items": [], "combined_text": "", "char_count": 0, "notes": ["ocr returned invalid json"]}
+
+    sections: list[str] = []
+    total_chars = 0
+    for item in items:
+        text = clean_multiline_text(item.get("text", ""))
+        if not text:
+            continue
+        total_chars += len(text)
+        sections.append(f"[OCR:{Path(item.get('path', '')).name}]\n{text}")
+    combined_text = "\n\n".join(sections)
+    return {
+        "items": items,
+        "combined_text": combined_text,
+        "char_count": total_chars,
+        "notes": [],
+    }
+
+
+def merge_ocr_capture(payload: dict[str, str], ocr_result: dict[str, Any], note_parts: list[str]) -> dict[str, str]:
+    combined_text = clean_multiline_text(ocr_result.get("combined_text", ""))
+    char_count = int(ocr_result.get("char_count", 0) or 0)
+    if combined_text:
+        existing_page_text = clean_multiline_text(payload.get("page_text", ""))
+        payload["page_text"] = (
+            existing_page_text + "\n\n" + combined_text if existing_page_text else combined_text
+        )
+    note_parts.append(build_ocr_note(extracted=bool(combined_text), char_count=char_count))
+    for note in ocr_result.get("notes", []):
+        if note:
+            note_parts.append(f"ocr_note={note}")
+    if combined_text:
+        payload["ingest_method"] = ",".join(
+            part for part in [payload.get("ingest_method", ""), "macos_vision_ocr"] if part
+        )
+        payload["ingest_status"] = page_fallback_status(payload)
+    return payload
+
+
+def run_playwright_page_capture(
+    task_row: dict[str, str],
+    asset_dir: Path,
+    timeout_seconds: int = 45,
+) -> dict[str, Any]:
+    if not PLAYWRIGHT_CAPTURE_SCRIPT.exists():
+        return {
+            "page_opened": False,
+            "notes": ["playwright capture script missing"],
+            "screenshot_count": 0,
+            "screenshot_dir": "",
+        }
+    if not PLAYWRIGHT_NODE_MODULES.exists():
+        return {
+            "page_opened": False,
+            "notes": ["playwright runtime missing under .tmp/playwright-runner"],
+            "screenshot_count": 0,
+            "screenshot_dir": "",
+        }
+
+    output_json = asset_dir / "playwright" / "page_capture.json"
+    ensure_dir(output_json.parent)
+    command = [
+        "node",
+        str(PLAYWRIGHT_CAPTURE_SCRIPT),
+        "--url",
+        extract_first_url(task_row.get("url", "")) or task_row.get("url", ""),
+        "--asset-dir",
+        str(asset_dir),
+        "--output-json",
+        str(output_json),
+        "--timeout-seconds",
+        str(timeout_seconds),
+    ]
+    env = os.environ.copy()
+    env["NODE_PATH"] = str(PLAYWRIGHT_NODE_MODULES)
+    try:
+        process = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds + 30,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "page_opened": False,
+            "notes": [f"playwright timeout after {timeout_seconds + 30}s"],
+            "screenshot_count": 0,
+            "screenshot_dir": "",
+        }
+
+    capture: dict[str, Any] = {}
+    stdout_text = clean_text(process.stdout)
+    stderr_text = clean_text(process.stderr)
+    if output_json.exists():
+        try:
+            capture = json.loads(output_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            capture = {}
+    elif process.stdout.strip():
+        try:
+            capture = json.loads(process.stdout)
+        except json.JSONDecodeError:
+            capture = {}
+
+    if not capture:
+        capture = {
+            "page_opened": False,
+            "notes": ["playwright returned no structured output"],
+            "screenshot_count": 0,
+            "screenshot_dir": "",
+        }
+    notes = [clean_text(note) for note in capture.get("notes", []) if clean_text(note)]
+    if process.returncode != 0 and stderr_text:
+        notes.append(stderr_text[:240])
+    capture["notes"] = notes
+    capture["_stdout"] = stdout_text[:240]
+    capture["_stderr"] = stderr_text[:240]
+    return capture
+
+
+def merge_playwright_capture(
+    payload: dict[str, str],
+    capture: dict[str, Any],
+    note_parts: list[str],
+    title_hint: str,
+    creator_input: str,
+) -> dict[str, str]:
+    opened = bool(capture.get("page_opened"))
+    description_visible = clean_multiline_text(capture.get("description_visible", ""))
+    page_text_visible = clean_multiline_text(capture.get("page_text_visible", ""))
+    visible_title = clean_text(capture.get("visible_title", ""))
+    creator_visible = clean_text(capture.get("creator_visible", ""))
+    publish_date_visible = clean_text(capture.get("publish_date_visible", ""))
+    screenshot_dir = clean_text(capture.get("screenshot_dir", ""))
+    screenshot_count = int(capture.get("screenshot_count", 0) or 0)
+    expand_clicked = bool(capture.get("expand_clicked"))
+
+    payload["ingest_method"] = ",".join(
+        part
+        for part in [payload.get("ingest_method", ""), "playwright_page"]
+        if part
+    )
+    if visible_title and (
+        not clean_text(payload.get("title_detected", ""))
+        or clean_text(payload.get("title_detected", "")) == title_hint
+    ):
+        payload["title_detected"] = visible_title
+        note_parts.append("title_detected updated from playwright page")
+    if creator_visible and (
+        not clean_text(payload.get("creator_detected", ""))
+        or clean_text(payload.get("creator_detected", "")) == creator_input
+    ):
+        payload["creator_detected"] = creator_visible
+        note_parts.append("creator_detected updated from playwright page")
+    if publish_date_visible and not clean_text(payload.get("publish_date", "")):
+        payload["publish_date"] = publish_date_visible
+        note_parts.append("publish_date filled from playwright page")
+    if description_visible and not clean_text(payload.get("description_text", "")):
+        payload["description_text"] = description_visible
+        note_parts.append("description_text filled from playwright page")
+    if page_text_visible:
+        payload["page_text"] = page_text_visible
+    if screenshot_dir:
+        try:
+            payload["screenshot_dir"] = str(Path(screenshot_dir).resolve().relative_to(PROJECT_ROOT))
+        except ValueError:
+            payload["screenshot_dir"] = screenshot_dir
+    note_parts.append(
+        build_playwright_note(
+            opened=opened,
+            expand_clicked=expand_clicked,
+            screenshot_count=screenshot_count,
+            page_text_present=bool(page_text_visible),
+            description_present=bool(description_visible),
+        )
+    )
+    for note in capture.get("notes", []):
+        if note:
+            note_parts.append(f"playwright_note={note}")
+
+    payload["ingest_status"] = page_fallback_status(payload)
+    return payload
+
+
+def fetch_video_assets(
+    task_row: dict[str, str],
+    cache_root: Path = CACHE_ROOT,
+    cookies_file: str = "",
+    cookies_from_browser: str = "",
+    timeout_seconds: int = 90,
+    page_fallback: bool = False,
+    ocr_fallback: bool = False,
+) -> dict[str, str]:
     task_id = task_row.get("task_id", "").strip()
-    url = task_row.get("url", "").strip()
+    raw_url = task_row.get("url", "").strip()
+    url = extract_first_url(raw_url) or raw_url
     language_hint = task_row.get("language", "").strip()
+    title_hint = clean_text(task_row.get("title_hint", ""))
+    creator_input = clean_text(task_row.get("creator", ""))
     asset_dir = cache_root / task_id
     ensure_dir(asset_dir)
     base_output = asset_dir / "source"
@@ -545,12 +959,54 @@ def fetch_video_assets(task_row: dict[str, str], cache_root: Path = CACHE_ROOT) 
             "creator_detected": "",
             "publish_date": "",
             "ingest_method": "yt-dlp",
-            "ingest_status": "failed",
+            "ingest_status": "asset_fetch_failed",
             "ingest_notes": "Missing task_id or url",
             "ingest_started_at": started_at,
             "ingest_finished_at": utc_now(),
         }
 
+    cookies_file_value, cookies_browser_value = resolve_cookie_options(
+        cookies_file=cookies_file,
+        cookies_from_browser=cookies_from_browser,
+    )
+    cookies_mode = cookies_mode_label(cookies_file_value, cookies_browser_value)
+    if cookies_file_value and not Path(cookies_file_value).exists():
+        return {
+            "task_id": task_id,
+            "platform": task_row.get("platform", "").strip(),
+            "url": url,
+            "creator_input": creator_input,
+            "creator_detected": "",
+            "title_detected": "",
+            "publish_date": "",
+            "description_text": "",
+            "subtitle_text": "",
+            "transcript_text": "",
+            "page_text": "",
+            "comments_text": "",
+            "audio_file_path": "",
+            "video_file_path": "",
+            "subtitle_file_path": "",
+            "screenshot_dir": "",
+            "asset_dir": str(asset_dir.relative_to(PROJECT_ROOT)),
+            "ingest_method": "yt-dlp,cookies_file",
+            "ingest_status": "asset_fetch_failed",
+            "ingest_notes": "; ".join(
+                [
+                    f"cookies file not found: {cookies_file_value}",
+                    build_ingest_diagnostic_note(
+                        metadata_present=False,
+                        description_present=False,
+                        subtitle_present=False,
+                        transcript_present=False,
+                        cookies_mode=cookies_mode,
+                        platform_block_reason="cookies_file_missing",
+                    ),
+                ]
+            ),
+            "ingest_started_at": started_at,
+            "ingest_finished_at": utc_now(),
+        }
     command = [
         yt_dlp_binary(),
         "--skip-download",
@@ -564,15 +1020,33 @@ def fetch_video_assets(task_row: dict[str, str], cache_root: Path = CACHE_ROOT) 
         "vtt",
         "-o",
         str(base_output) + ".%(ext)s",
-        url,
     ]
-    process = subprocess.run(
-        command,
-        cwd=PROJECT_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    ingest_method_parts = ["yt-dlp"]
+    if cookies_file_value:
+        command.extend(["--cookies", cookies_file_value])
+        ingest_method_parts.append("cookies_file")
+    if cookies_browser_value:
+        command.extend(["--cookies-from-browser", cookies_browser_value])
+        ingest_method_parts.append("cookies_from_browser")
+    command.append(url)
+    timed_out = False
+    try:
+        process = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        process = subprocess.CompletedProcess(
+            args=exc.cmd,
+            returncode=124,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+        )
 
     info_files = sorted(asset_dir.glob("*.info.json"))
     info: dict[str, Any] = {}
@@ -588,53 +1062,71 @@ def fetch_video_assets(task_row: dict[str, str], cache_root: Path = CACHE_ROOT) 
         description_text = clean_multiline_text(description_text)
 
     subtitle_body = ""
+    transcript_body = ""
     subtitle_path = ""
     subtitle_candidates = preferred_subtitle_files(asset_dir, language_hint)
+    manual_caption_map = info.get("subtitles") or {}
+    auto_caption_map = info.get("automatic_captions") or {}
     if subtitle_candidates:
         subtitle_raw, subtitle_path = read_first_match(subtitle_candidates)
-        subtitle_body = clean_vtt(subtitle_raw)
+        cleaned_caption = clean_vtt(subtitle_raw)
+        if cleaned_caption:
+            if manual_caption_map:
+                subtitle_body = cleaned_caption
+            elif auto_caption_map:
+                transcript_body = cleaned_caption
+            else:
+                subtitle_body = cleaned_caption
 
     title_detected = clean_text(str(info.get("title", "")))
     creator_detected = clean_text(
         str(info.get("uploader") or info.get("channel") or info.get("creator") or "")
     )
     publish_date = format_upload_date(str(info.get("upload_date") or ""))
+    fetched_title = bool(title_detected)
+    fetched_creator = bool(creator_detected)
+    fetched_publish_date = bool(publish_date)
+    fetched_description = bool(description_text)
+    fetched_subtitle = bool(subtitle_body)
+    fetched_transcript = bool(transcript_body)
 
     note_parts: list[str] = []
     stderr_text = clean_text(process.stderr)
     stdout_text = clean_text(process.stdout)
+    platform_block_reason = detect_platform_block_reason(stderr_text, stdout_text, timed_out)
+    if timed_out:
+        note_parts.append(f"yt-dlp timed out after {timeout_seconds}s")
     if process.returncode != 0:
         note_parts.append(f"yt-dlp exit code {process.returncode}")
-    if not title_detected:
-        note_parts.append("title missing")
-    if not description_text:
-        note_parts.append("description missing")
-    if not subtitle_body:
-        note_parts.append("subtitle missing")
+    if raw_url and raw_url != url:
+        note_parts.append("canonical url extracted from share text")
+    if cookies_file_value:
+        note_parts.append("cookies enabled via file")
+    if cookies_browser_value:
+        note_parts.append(f"cookies enabled via browser:{cookies_browser_value}")
     if stderr_text:
         note_parts.append(stderr_text[:240])
     elif stdout_text and process.returncode != 0:
         note_parts.append(stdout_text[:240])
 
-    useful_payload = bool(title_detected or description_text or subtitle_body or creator_detected)
-    if title_detected and (description_text or subtitle_body):
-        status = "success"
-    elif useful_payload:
-        status = "partial"
-    else:
-        status = "failed"
+    if not title_detected and title_hint:
+        title_detected = title_hint
+        note_parts.append("title_detected filled from input title_hint")
+    if not creator_detected and creator_input:
+        creator_detected = creator_input
+        note_parts.append("creator_detected filled from input creator")
 
-    return {
+    payload = {
         "task_id": task_id,
         "platform": task_row.get("platform", "").strip(),
         "url": url,
-        "creator_input": task_row.get("creator", "").strip(),
+        "creator_input": creator_input,
         "creator_detected": creator_detected,
         "title_detected": title_detected,
         "publish_date": publish_date,
         "description_text": description_text,
         "subtitle_text": subtitle_body,
-        "transcript_text": "",
+        "transcript_text": transcript_body,
         "page_text": "",
         "comments_text": "",
         "audio_file_path": "",
@@ -642,15 +1134,82 @@ def fetch_video_assets(task_row: dict[str, str], cache_root: Path = CACHE_ROOT) 
         "subtitle_file_path": str(Path(subtitle_path).relative_to(PROJECT_ROOT)) if subtitle_path else "",
         "screenshot_dir": "",
         "asset_dir": str(asset_dir.relative_to(PROJECT_ROOT)),
-        "ingest_method": "yt-dlp",
-        "ingest_status": status,
-        "ingest_notes": "; ".join(note_parts),
+        "ingest_method": ",".join(ingest_method_parts),
+        "ingest_status": ingest_status_from_capture(
+            fetched_title=fetched_title,
+            fetched_creator=fetched_creator,
+            fetched_publish_date=fetched_publish_date,
+            fetched_description=fetched_description,
+            fetched_subtitle=fetched_subtitle,
+            fetched_transcript=fetched_transcript,
+        ),
+        "ingest_notes": "",
         "ingest_started_at": started_at,
         "ingest_finished_at": utc_now(),
     }
+    captured_fields = [
+        field_name
+        for field_name, captured in [
+            ("title_detected", fetched_title),
+            ("creator_detected", fetched_creator),
+            ("publish_date", fetched_publish_date),
+            ("description_text", fetched_description),
+            ("subtitle_text", fetched_subtitle),
+            ("transcript_text", fetched_transcript),
+        ]
+        if captured
+    ]
+    missing_fields = summarize_missing_fields(payload)
+    note_parts.append(
+        build_ingest_diagnostic_note(
+            metadata_present=bool(fetched_title or fetched_creator or fetched_publish_date),
+            description_present=fetched_description,
+            subtitle_present=fetched_subtitle,
+            transcript_present=fetched_transcript,
+            cookies_mode=cookies_mode,
+            platform_block_reason=platform_block_reason,
+        )
+    )
+    if captured_fields:
+        note_parts.append("captured_fields=" + ",".join(captured_fields))
+    if missing_fields:
+        note_parts.append("missing_fields=" + ",".join(missing_fields))
+
+    should_run_page_fallback = page_fallback and (
+        "dou" in clean_text(task_row.get("platform", "")).lower()
+        or "douyin" in url.lower()
+    )
+    if should_run_page_fallback and not (
+        clean_text(payload.get("description_text", ""))
+        or clean_text(payload.get("subtitle_text", ""))
+        or clean_text(payload.get("transcript_text", ""))
+        or clean_text(payload.get("page_text", ""))
+    ):
+        capture = run_playwright_page_capture(task_row, asset_dir, timeout_seconds=45)
+        payload = merge_playwright_capture(
+            payload=payload,
+            capture=capture,
+            note_parts=note_parts,
+            title_hint=title_hint,
+            creator_input=creator_input,
+        )
+        if ocr_fallback and clean_text(payload.get("screenshot_dir", "")):
+            screenshot_dir = PROJECT_ROOT / payload["screenshot_dir"]
+            ocr_result = run_ocr_on_screenshots(str(screenshot_dir))
+            payload = merge_ocr_capture(payload, ocr_result, note_parts)
+
+    payload["ingest_notes"] = "; ".join(note_parts)
+    return payload
 
 
-def run_ingest(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
+def run_ingest(
+    workbook_path: Path = WORKBOOK_DEFAULT,
+    cookies_file: str = "",
+    cookies_from_browser: str = "",
+    timeout_seconds: int = 90,
+    page_fallback: bool = False,
+    ocr_fallback: bool = False,
+) -> dict[str, Any]:
     input_headers, input_rows = read_sheet_rows(workbook_path, "input_videos")
     _, raw_rows = read_sheet_rows(workbook_path, "raw_ingest")
     raw_by_task = records_by_key(raw_rows, "task_id")
@@ -659,9 +1218,16 @@ def run_ingest(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
         status = row.get("status", "").strip().lower()
         if status != "pending":
             continue
-        result = fetch_video_assets(row)
+        result = fetch_video_assets(
+            row,
+            cookies_file=cookies_file,
+            cookies_from_browser=cookies_from_browser,
+            timeout_seconds=timeout_seconds,
+            page_fallback=page_fallback,
+            ocr_fallback=ocr_fallback,
+        )
         raw_by_task[result["task_id"]] = {header: result.get(header, "") for header in RAW_INGEST_HEADERS}
-        row["status"] = "ingested" if result["ingest_status"] == "success" else result["ingest_status"]
+        row["status"] = "failed" if result["ingest_status"] == "asset_fetch_failed" else "ingested"
         row["updated_at"] = utc_now()
         if not row.get("created_at"):
             row["created_at"] = row["updated_at"]
@@ -718,12 +1284,24 @@ def infer_reel_type(text: str) -> str:
 
 def find_model_candidates(text: str) -> list[str]:
     candidates: list[str] = []
-    for pattern in (MODEL_REGEX, MODEL_REGEX_CN):
+    for pattern in (MODEL_REGEX, MODEL_REGEX_CN, MODEL_REGEX_GENERIC):
         for match in pattern.findall(text or ""):
             candidate = clean_text(match)
             if 2 <= len(candidate) <= 28 and candidate not in candidates:
                 candidates.append(candidate)
     return candidates
+
+
+def best_model_candidate(*texts: str) -> str:
+    for text in texts:
+        candidates = find_model_candidates(text)
+        if candidates:
+            return candidates[0]
+    for text in texts:
+        cleaned = clean_text(text)
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def split_segments(text: str) -> list[str]:
@@ -765,24 +1343,116 @@ def confidence_for_quote(quote_type: str) -> str:
     return "medium"
 
 
+def confidence_rank(value: str) -> int:
+    return {"high": 3, "medium": 2, "low": 1}.get(clean_text(value).lower(), 0)
+
+
+def source_quote_type_rank(value: str) -> int:
+    return SOURCE_PRIORITY.get(value, 0)
+
+
+def choose_better_extract_row(current: dict[str, str], candidate: dict[str, str]) -> dict[str, str]:
+    current_confidence = confidence_rank(current.get("confidence", ""))
+    candidate_confidence = confidence_rank(candidate.get("confidence", ""))
+    if candidate_confidence != current_confidence:
+        return candidate if candidate_confidence > current_confidence else current
+
+    current_quote_type = source_quote_type_rank(current.get("source_quote_type", ""))
+    candidate_quote_type = source_quote_type_rank(candidate.get("source_quote_type", ""))
+    if candidate_quote_type != current_quote_type:
+        return candidate if candidate_quote_type > current_quote_type else current
+
+    current_quote_len = len(clean_text(current.get("source_quote", ""))) or 10**9
+    candidate_quote_len = len(clean_text(candidate.get("source_quote", ""))) or 10**9
+    if candidate_quote_len != current_quote_len:
+        return candidate if candidate_quote_len < current_quote_len else current
+
+    return candidate if candidate.get("extract_id", "") < current.get("extract_id", "") else current
+
+
+def append_record(
+    records: list[dict[str, str]],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    key: tuple[str, str, str, str],
+    row: dict[str, str],
+) -> None:
+    if key in seen:
+        return
+    seen.add(key)
+    records.append(row)
+
+
+def normalize_material_value(value: str) -> str:
+    return clean_text(value)
+
+
+def build_review_reasons_for_field(
+    *,
+    field_name: str,
+    numeric_fields: list[str],
+    material_fields: list[str],
+    confidence: str,
+) -> list[str]:
+    review_reasons = ["review_required"]
+    if field_name in numeric_fields:
+        review_reasons.append("numeric_field")
+    if field_name in material_fields:
+        review_reasons.append("material_field")
+    if confidence != "high":
+        review_reasons.append("confidence_not_high")
+    return review_reasons
+
+
+def natural_material_matches(segment: str) -> list[tuple[str, str, str]]:
+    matches: list[tuple[str, str, str]] = []
+    for regex in NATURAL_BODY_MATERIAL_PATTERNS:
+        match = regex.search(segment)
+        if match:
+            matches.append(("body_material", clean_text(match.group(1)), "regex-natural"))
+    for regex in NATURAL_MAIN_GEAR_MATERIAL_PATTERNS:
+        match = regex.search(segment)
+        if match:
+            matches.append(("main_gear_material", clean_text(match.group(1)), "regex-natural"))
+    for regex in NATURAL_MINOR_GEAR_MATERIAL_PATTERNS:
+        match = regex.search(segment)
+        if match:
+            matches.append(("minor_gear_material", clean_text(match.group(1)), "regex-natural"))
+    for regex in NATURAL_SHARED_GEAR_MATERIAL_PATTERNS:
+        match = regex.search(segment)
+        if match:
+            material_value = clean_text(match.group(1))
+            matches.append(("main_gear_material", material_value, "regex-natural-shared"))
+            matches.append(("minor_gear_material", material_value, "regex-natural-shared"))
+    deduped: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for field_name, material_value, extraction_method in matches:
+        deduped[(field_name, material_value)] = (field_name, material_value, extraction_method)
+    return list(deduped.values())
+
+
+def natural_spool_axis_match(segment: str) -> tuple[str, str, str] | None:
+    for pattern in NATURAL_SPOOL_AXIS_PATTERNS:
+        match = pattern["regex"].search(segment)
+        if match:
+            return (
+                clean_text(match.group(1)),
+                clean_text(pattern["normalized"]),
+                clean_text(pattern["extract_notes"]),
+            )
+    return None
+
+
 def normalize_value(field_name: str, value: str) -> tuple[str, str]:
     cleaned = clean_text(value)
-    if field_name in {"market_reference_price"}:
-        return re.sub(r"[^\d.]", "", cleaned), "CNY"
     if field_name in {
         "spool_diameter_mm",
         "spool_width_mm",
-        "knob_size",
-        "handle_knob_exchange_size",
     }:
         return re.sub(r"[^\d.]", "", cleaned), "mm"
     if field_name in {"spool_weight_g"}:
         return re.sub(r"[^\d.]", "", cleaned), "g"
-    if field_name == "is_handle_double":
-        lowered = cleaned.lower()
-        if lowered in {"yes", "true", "1"}:
-            return "yes", ""
-        return "yes", ""
+    if field_name == "main_gear_size":
+        return cleaned, ""
     return cleaned, ""
 
 
@@ -799,17 +1469,56 @@ def extract_rows_from_record(
     seen: set[tuple[str, str, str, str]] = set()
 
     source_fields = [
-        "title_detected",
-        "description_text",
         "subtitle_text",
         "transcript_text",
+        "description_text",
         "page_text",
-        "comments_text",
     ]
 
     combined_text = "\n".join(raw_row.get(name, "") for name in source_fields)
     global_models = find_model_candidates(combined_text)
     fallback_model = global_models[0] if global_models else ""
+
+    primary_model = best_model_candidate(
+        raw_row.get("title_detected", ""),
+        raw_row.get("description_text", ""),
+        raw_row.get("subtitle_text", ""),
+        raw_row.get("transcript_text", ""),
+        raw_row.get("url", ""),
+    )
+    if primary_model and "model_cn" in allowed_fields:
+        normalized_model = normalize_model(primary_model, model_map)
+        brand = infer_brand(normalized_model or primary_model)
+        model_source_quote = clean_text(raw_row.get("title_detected", "")) or clean_text(raw_row.get("url", ""))
+        model_quote_type = "title" if clean_text(raw_row.get("title_detected", "")) else "manual_note"
+        model_confidence = "medium" if model_quote_type == "title" else "low"
+        model_review_reasons = ["review_required"]
+        if model_confidence != "high":
+            model_review_reasons.append("confidence_not_high")
+        records.append(
+            build_extract_row(
+                raw_row=raw_row,
+                field_name="model_cn",
+                field_value_raw=primary_model,
+                field_value_normalized=normalized_model,
+                unit="",
+                value_type="text",
+                source_quote=model_source_quote,
+                source_quote_type=model_quote_type,
+                source_authority=source_authority_for_quote(
+                    model_quote_type,
+                    raw_row.get("creator_detected") or raw_row.get("creator_input") or raw_row.get("creator", ""),
+                    source_rules,
+                ),
+                confidence=model_confidence,
+                review_reasons=model_review_reasons,
+                extraction_method="model-detection",
+                reel_model_raw=primary_model,
+                reel_model_normalized=normalized_model,
+                reel_brand_normalized=brand,
+                reel_type_guess=infer_reel_type(raw_row.get("title_detected", "") or raw_row.get("description_text", "")),
+            )
+        )
 
     for source_name in source_fields:
         source_text = raw_row.get(source_name, "")
@@ -827,35 +1536,34 @@ def extract_rows_from_record(
             reel_type = infer_reel_type(segment or raw_row.get("title_detected", ""))
 
             for field_name, matchers in NUMERIC_PATTERNS.items():
-                if field_name not in allowed_fields:
+                if field_name not in allowed_fields or field_name not in ACTIVE_EXTRACT_FIELDS:
                     continue
-                for regex, unit, value_type in matchers:
+                for regex in matchers:
                     match = regex.search(segment)
                     if not match:
                         continue
-                    value_raw = match.group(1)
+                    value_raw = clean_text(match.group(1))
                     value_normalized, normalized_unit = normalize_value(field_name, value_raw)
-                    final_unit = unit or normalized_unit
+                    final_unit = normalized_unit
                     key = (field_name, value_normalized, segment, reel_model_raw)
-                    if key in seen:
-                        continue
-                    seen.add(key)
                     confidence = confidence_for_quote(quote_type)
-                    review_reasons = []
-                    if field_name in numeric_fields:
-                        review_reasons.append("numeric_field")
-                    if field_name in material_fields:
-                        review_reasons.append("material_field")
-                    if confidence != "high":
-                        review_reasons.append("confidence_not_high")
-                    records.append(
-                        build_extract_row(
+                    review_reasons = build_review_reasons_for_field(
+                        field_name=field_name,
+                        numeric_fields=numeric_fields,
+                        material_fields=material_fields,
+                        confidence=confidence,
+                    )
+                    append_record(
+                        records,
+                        seen,
+                        key=key,
+                        row=build_extract_row(
                             raw_row=raw_row,
                             field_name=field_name,
                             field_value_raw=value_raw,
                             field_value_normalized=value_normalized,
                             unit=final_unit,
-                            value_type=value_type,
+                            value_type="number",
                             source_quote=segment,
                             source_quote_type=quote_type,
                             source_authority=source_authority_for_quote(quote_type, raw_row.get("creator_detected") or raw_row.get("creator_input") or raw_row.get("creator", ""), source_rules),
@@ -866,11 +1574,11 @@ def extract_rows_from_record(
                             reel_model_normalized=reel_model_normalized,
                             reel_brand_normalized=reel_brand,
                             reel_type_guess=reel_type,
-                        )
+                        ),
                     )
 
             for field_name, regex in MATERIAL_PATTERNS.items():
-                if field_name not in allowed_fields:
+                if field_name not in allowed_fields or field_name not in ACTIVE_EXTRACT_FIELDS:
                     continue
                 match = regex.search(segment)
                 if not match:
@@ -878,15 +1586,18 @@ def extract_rows_from_record(
                 value_raw = clean_text(match.group(1))
                 value_normalized, unit = normalize_value(field_name, value_raw)
                 key = (field_name, value_normalized, segment, reel_model_raw)
-                if key in seen:
-                    continue
-                seen.add(key)
                 confidence = confidence_for_quote(quote_type)
-                review_reasons = ["material_field"]
-                if confidence != "high":
-                    review_reasons.append("confidence_not_high")
-                records.append(
-                    build_extract_row(
+                review_reasons = build_review_reasons_for_field(
+                    field_name=field_name,
+                    numeric_fields=numeric_fields,
+                    material_fields=material_fields,
+                    confidence=confidence,
+                )
+                append_record(
+                    records,
+                    seen,
+                    key=key,
+                    row=build_extract_row(
                         raw_row=raw_row,
                         field_name=field_name,
                         field_value_raw=value_raw,
@@ -903,11 +1614,48 @@ def extract_rows_from_record(
                         reel_model_normalized=reel_model_normalized,
                         reel_brand_normalized=reel_brand,
                         reel_type_guess=reel_type,
-                    )
+                    ),
+                )
+
+            for field_name, material_value, extraction_method in natural_material_matches(segment):
+                if field_name not in allowed_fields or field_name not in ACTIVE_EXTRACT_FIELDS:
+                    continue
+                value_raw = normalize_material_value(material_value)
+                value_normalized, unit = normalize_value(field_name, value_raw)
+                key = (field_name, value_normalized, segment, reel_model_raw)
+                confidence = "medium" if quote_type in {"description", "page_text"} else "low"
+                review_reasons = build_review_reasons_for_field(
+                    field_name=field_name,
+                    numeric_fields=numeric_fields,
+                    material_fields=material_fields,
+                    confidence=confidence,
+                )
+                append_record(
+                    records,
+                    seen,
+                    key=key,
+                    row=build_extract_row(
+                        raw_row=raw_row,
+                        field_name=field_name,
+                        field_value_raw=value_raw,
+                        field_value_normalized=value_normalized,
+                        unit=unit,
+                        value_type="material",
+                        source_quote=segment,
+                        source_quote_type=quote_type,
+                        source_authority=source_authority_for_quote(quote_type, raw_row.get("creator_detected") or raw_row.get("creator_input") or raw_row.get("creator", ""), source_rules),
+                        confidence=confidence,
+                        review_reasons=review_reasons,
+                        extraction_method=extraction_method,
+                        reel_model_raw=reel_model_raw,
+                        reel_model_normalized=reel_model_normalized,
+                        reel_brand_normalized=reel_brand,
+                        reel_type_guess=reel_type,
+                    ),
                 )
 
             for field_name, regex in TEXT_PATTERNS.items():
-                if field_name not in allowed_fields:
+                if field_name not in allowed_fields or field_name not in ACTIVE_EXTRACT_FIELDS:
                     continue
                 match = regex.search(segment)
                 if not match:
@@ -915,19 +1663,18 @@ def extract_rows_from_record(
                 value_raw = clean_text(match.group(1) if match.groups() else segment)
                 value_normalized, unit = normalize_value(field_name, value_raw)
                 key = (field_name, value_normalized, segment, reel_model_raw)
-                if key in seen:
-                    continue
-                seen.add(key)
                 confidence = confidence_for_quote(quote_type)
-                review_reasons = []
-                if field_name in numeric_fields:
-                    review_reasons.append("numeric_field")
-                if field_name in material_fields:
-                    review_reasons.append("material_field")
-                if confidence != "high":
-                    review_reasons.append("confidence_not_high")
-                records.append(
-                    build_extract_row(
+                review_reasons = build_review_reasons_for_field(
+                    field_name=field_name,
+                    numeric_fields=numeric_fields,
+                    material_fields=material_fields,
+                    confidence=confidence,
+                )
+                append_record(
+                    records,
+                    seen,
+                    key=key,
+                    row=build_extract_row(
                         raw_row=raw_row,
                         field_name=field_name,
                         field_value_raw=value_raw,
@@ -944,42 +1691,43 @@ def extract_rows_from_record(
                         reel_model_normalized=reel_model_normalized,
                         reel_brand_normalized=reel_brand,
                         reel_type_guess=reel_type,
-                    )
+                    ),
                 )
 
-            for field_name, regex in BOOLEAN_PATTERNS.items():
-                if field_name not in allowed_fields:
-                    continue
-                if not regex.search(segment):
-                    continue
-                value_raw = "yes"
-                key = (field_name, value_raw, segment, reel_model_raw)
-                if key in seen:
-                    continue
-                seen.add(key)
-                confidence = confidence_for_quote(quote_type)
-                review_reasons = []
-                if confidence != "high":
-                    review_reasons.append("confidence_not_high")
-                records.append(
-                    build_extract_row(
+            natural_axis = natural_spool_axis_match(segment)
+            if natural_axis and "spool_axis_type" in allowed_fields and "spool_axis_type" in ACTIVE_EXTRACT_FIELDS:
+                value_raw, value_normalized, extract_notes = natural_axis
+                key = ("spool_axis_type", value_normalized, segment, reel_model_raw)
+                confidence = "low"
+                review_reasons = build_review_reasons_for_field(
+                    field_name="spool_axis_type",
+                    numeric_fields=numeric_fields,
+                    material_fields=material_fields,
+                    confidence=confidence,
+                )
+                append_record(
+                    records,
+                    seen,
+                    key=key,
+                    row=build_extract_row(
                         raw_row=raw_row,
-                        field_name=field_name,
+                        field_name="spool_axis_type",
                         field_value_raw=value_raw,
-                        field_value_normalized="yes",
+                        field_value_normalized=value_normalized,
                         unit="",
-                        value_type="boolean",
+                        value_type="text",
                         source_quote=segment,
                         source_quote_type=quote_type,
                         source_authority=source_authority_for_quote(quote_type, raw_row.get("creator_detected") or raw_row.get("creator_input") or raw_row.get("creator", ""), source_rules),
                         confidence=confidence,
                         review_reasons=review_reasons,
-                        extraction_method="keyword-explicit",
+                        extraction_method="regex-natural",
                         reel_model_raw=reel_model_raw,
                         reel_model_normalized=reel_model_normalized,
                         reel_brand_normalized=reel_brand,
                         reel_type_guess=reel_type,
-                    )
+                        extract_notes=extract_notes,
+                    ),
                 )
 
     return records
@@ -1002,6 +1750,7 @@ def build_extract_row(
     reel_model_normalized: str,
     reel_brand_normalized: str,
     reel_type_guess: str,
+    extract_notes: str = "",
 ) -> dict[str, str]:
     extract_id = stable_id(
         "ext",
@@ -1034,7 +1783,7 @@ def build_extract_row(
         "review_required": "yes" if review_reasons else "no",
         "review_reason": ",".join(review_reasons),
         "extraction_method": extraction_method,
-        "extract_notes": "",
+        "extract_notes": extract_notes,
         "created_at": utc_now(),
     }
 
@@ -1046,10 +1795,26 @@ def run_extract(workbook_path: Path = WORKBOOK_DEFAULT) -> dict[str, Any]:
     model_map = load_model_normalization()
     extracted_rows: list[dict[str, str]] = []
     for raw_row in raw_rows:
-        if raw_row.get("ingest_status", "").strip() not in {"success", "partial"}:
+        if not any(
+            clean_text(raw_row.get(field_name, ""))
+            for field_name in ["title_detected", "subtitle_text", "transcript_text", "description_text", "page_text"]
+        ):
             continue
         extracted_rows.extend(extract_rows_from_record(raw_row, field_rules, source_rules, model_map))
-    extracted_rows.sort(key=lambda row: (row["task_id"], row["field_name"], row["extract_id"]))
+    deduped: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    for row in extracted_rows:
+        dedupe_key = (
+            row.get("task_id", ""),
+            row.get("reel_model_normalized", "") or row.get("reel_model_raw", ""),
+            row.get("field_name", ""),
+            row.get("field_value_normalized", "") or row.get("field_value_raw", ""),
+        )
+        existing = deduped.get(dedupe_key)
+        deduped[dedupe_key] = row if existing is None else choose_better_extract_row(existing, row)
+    extracted_rows = sorted(
+        deduped.values(),
+        key=lambda row: (row["task_id"], row["field_name"], row["extract_id"]),
+    )
     write_sheet_rows(workbook_path, "player_data_extract", PLAYER_EXTRACT_HEADERS, extracted_rows)
     return {
         "extract_count": len(extracted_rows),
@@ -1062,12 +1827,6 @@ def should_review(row: dict[str, str], field_rules: dict[str, Any]) -> tuple[boo
     field_name = row.get("field_name", "")
     if row.get("review_required", "").strip().lower() == "yes":
         reasons.append("review_required")
-    if row.get("confidence", "").strip().lower() in {"medium", "low"}:
-        reasons.append("confidence_check")
-    if field_name in field_rules["numeric_fields"]:
-        reasons.append("numeric_field")
-    if field_name in field_rules["material_fields"]:
-        reasons.append("material_field")
     return bool(reasons), reasons
 
 

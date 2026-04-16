@@ -35,6 +35,39 @@ function dedupeLines(lines) {
   return result;
 }
 
+const NOISE_MARKERS = [
+  '合集',
+  '播放中',
+  '推荐视频',
+  '全部评论',
+  '大家都在搜',
+  '扫码登录',
+  '验证码登录',
+  '登录后免费畅享高清视频',
+  '打开「抖音APP」',
+  '广告投放',
+  '点击加载更',
+  '推荐',
+];
+
+function stableAnchor(value) {
+  const text = cleanText(value).replace(/#\S+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.slice(0, Math.min(text.length, 20));
+}
+
+function truncateAtNoise(lines) {
+  const result = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (NOISE_MARKERS.some((marker) => line.includes(marker))) {
+      break;
+    }
+    result.push(line);
+  }
+  return result;
+}
+
 function extractPublishDate(bodyText) {
   const match = bodyText.match(/发布时间[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s*[0-9]{2}:[0-9]{2})/);
   return match ? cleanText(match[1]) : '';
@@ -57,29 +90,37 @@ function extractDescription(bodyText) {
   return '';
 }
 
-function extractContentBlock(bodyText) {
+function extractContentBlock(bodyText, descriptionText = '', visibleTitle = '') {
   const lines = dedupeLines(
     String(bodyText || '')
       .split(/\r?\n/)
       .map((line) => cleanText(line))
       .filter(Boolean)
   );
-  const startMarkers = ['00:00 /', '章节要点', '内容由AI生成'];
-  const endMarkers = ['全部评论', '推荐视频', '登录后免费畅享高清视频', '广告投放'];
-  let startIndex = lines.findIndex((line) => startMarkers.some((marker) => line.includes(marker)));
+  const startMarkers = ['章节要点', '内容由AI生成', '发布时间：', '00:00 /', '|| 00:'];
+  const anchors = [stableAnchor(descriptionText), stableAnchor(visibleTitle)].filter(Boolean);
+
+  let anchorIndex = -1;
+  for (const anchor of anchors) {
+    anchorIndex = lines.findIndex((line) => line.includes(anchor));
+    if (anchorIndex !== -1) break;
+  }
+
+  let startIndex = anchorIndex;
   if (startIndex === -1) {
-    startIndex = lines.findIndex((line) => line.includes('发布时间：'));
+    startIndex = lines.findIndex((line) => startMarkers.some((marker) => line.includes(marker)));
   }
   if (startIndex === -1) {
     return '';
   }
-  let endIndex = lines.findIndex(
-    (line, idx) => idx > startIndex && endMarkers.some((marker) => line.includes(marker))
-  );
-  if (endIndex === -1) {
-    endIndex = Math.min(lines.length, startIndex + 80);
+
+  if (anchorIndex !== -1) {
+    startIndex = Math.max(0, anchorIndex - 4);
   }
-  return cleanMultiline(lines.slice(startIndex, endIndex).join('\n'));
+
+  let candidateLines = lines.slice(startIndex, Math.min(lines.length, startIndex + 40));
+  candidateLines = truncateAtNoise(candidateLines);
+  return cleanMultiline(candidateLines.join('\n'));
 }
 
 async function maybeClickExpand(page) {
@@ -97,6 +138,53 @@ async function maybeClickExpand(page) {
     }
   }
   return { clicked: false, label: '' };
+}
+
+async function hideIntrusiveOverlays(page) {
+  await page.evaluate(() => {
+    const markers = ['登录后免费畅享高清视频', '扫码登录', '验证码登录', '密码登录', '打开「抖音APP」'];
+    const elements = Array.from(document.querySelectorAll('body *'));
+    for (const element of elements) {
+      const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      if (!markers.some((marker) => text.includes(marker))) continue;
+      let current = element;
+      for (let depth = 0; depth < 5 && current; depth += 1) {
+        const style = window.getComputedStyle(current);
+        if (style.position === 'fixed' || style.position === 'sticky') {
+          current.style.display = 'none';
+          break;
+        }
+        current = current.parentElement;
+      }
+    }
+  }).catch(() => {});
+}
+
+async function seekVideoToRatio(page, ratio) {
+  return page.evaluate((targetRatio) => {
+    const video = document.querySelector('video');
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
+      return { sought: false, duration: Number(video && video.duration) || 0 };
+    }
+    const clamped = Math.max(0, Math.min(1, Number(targetRatio) || 0));
+    video.currentTime = Math.min(video.duration - 0.2, Math.max(0.1, video.duration * clamped));
+    return { sought: true, duration: video.duration, currentTime: video.currentTime };
+  }, ratio).catch(() => ({ sought: false, duration: 0 }));
+}
+
+async function captureVideoOrPage(page, outputPath) {
+  const video = page.locator('video').first();
+  try {
+    if (await video.count()) {
+      await video.screenshot({ path: outputPath });
+      return 'video';
+    }
+  } catch (_) {
+    // fall back to the page screenshot below
+  }
+  await page.screenshot({ path: outputPath });
+  return 'page';
 }
 
 async function capture() {
@@ -158,20 +246,32 @@ async function capture() {
     }
 
     const expandedPath = path.join(screenshotDir, '02_expanded_text.png');
+    await hideIntrusiveOverlays(page);
     await page.screenshot({ path: expandedPath });
     result.screenshot_files.push(expandedPath);
 
-    await page.evaluate(() => window.scrollTo(0, Math.max(900, window.innerHeight * 0.8)));
-    await page.waitForTimeout(1200);
+    const seekResult = await seekVideoToRatio(page, 0.55);
+    if (seekResult && seekResult.sought) {
+      result.notes.push(`video_seeked=${String(Math.round((seekResult.currentTime || 0) * 10) / 10)}s`);
+      await page.waitForTimeout(1600);
+    } else {
+      await page.evaluate(() => window.scrollTo(0, Math.max(900, window.innerHeight * 0.8)));
+      await page.waitForTimeout(1200);
+    }
+    await hideIntrusiveOverlays(page);
     const middlePath = path.join(screenshotDir, '03_mid_page.png');
-    await page.screenshot({ path: middlePath });
+    const middleMode = await captureVideoOrPage(page, middlePath);
+    result.notes.push(`mid_capture_mode=${middleMode}`);
     result.screenshot_files.push(middlePath);
 
     const bodyText = cleanMultiline(await page.locator('body').innerText().catch(() => ''));
     result.creator_visible = extractCreator(`\n${bodyText}\n`);
     result.publish_date_visible = extractPublishDate(bodyText);
     result.description_visible = extractDescription(bodyText);
-    result.page_text_visible = extractContentBlock(bodyText) || bodyText.slice(0, 3000);
+    result.page_text_visible =
+      extractContentBlock(bodyText, result.description_visible, result.visible_title) ||
+      extractContentBlock(bodyText, '', result.visible_title) ||
+      cleanMultiline(bodyText.slice(0, 1200));
     result.screenshot_count = result.screenshot_files.length;
   } finally {
     await context.close();

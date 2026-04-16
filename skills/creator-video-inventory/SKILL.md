@@ -1,10 +1,10 @@
 ---
 name: creator-video-inventory
-description: Enumerate one Douyin creator homepage, collect a deduplicated video inventory, write creator_video_inventory, and optionally append unseen video links into input_videos.
+description: Enumerate one Douyin creator homepage or one creator category/tab, collect a deduplicated video inventory, write creator_video_inventory, and optionally append unseen video links into input_videos.
 ---
 
 # Purpose
-Use this skill when the goal is to inventory all visible videos for one Douyin creator before running ingest and extraction.
+Use this skill when the goal is to inventory all visible videos for one Douyin creator, or for one specific creator category/tab, before running ingest and extraction.
 
 # When to use
 Use this skill when:
@@ -22,6 +22,9 @@ Do not use this skill when:
 - One Douyin creator homepage URL, or a creator-scoped Douyin page that can be normalized into a creator homepage
 - Workbook: `data/input/reel_player_data_pipeline_v1.xlsx`
 - Optional but recommended for better coverage: a local Netscape-format Douyin cookies file passed at runtime, not stored in repo code
+- Optional category selector:
+  - `--category-title "<visible tab text>"`
+  - `--category-index <0-based visible tab index>`
 
 # Output
 - Write deduplicated rows into `creator_video_inventory`
@@ -36,10 +39,11 @@ Primary entry point:
 3. Scroll to trigger lazy loading.
 4. Capture as many visible or page-discoverable video links as possible.
 5. Deduplicate by `video_id` or `video_url`.
-6. Write rows into `creator_video_inventory`.
-7. Append new rows into `input_videos` only when the `video_url` is not already present.
-8. Keep incomplete metadata blank instead of guessed.
-9. Record blocking or instability reasons in `inventory_notes`.
+6. When a category is requested, click that category/tab before enumeration and keep the category marker in `inventory_notes`.
+7. Write rows into `creator_video_inventory`.
+8. Append new rows into `input_videos` only when the `video_id` or canonical `video_url` is not already present.
+9. Keep incomplete metadata blank instead of guessed.
+10. Record blocking or instability reasons in `inventory_notes`.
 
 # Tool preference
 - Primary: Playwright, Excel, filesystem
@@ -60,6 +64,7 @@ Output:
 - `video_id` should be parsed from `/video/<id>`, `modal_id`, or `aweme_id` when available
 - `video_url` should be canonicalized to `https://www.douyin.com/video/<id>` when `video_id` is known
 - `title_detected`, `publish_date`, and `cover_text` may remain blank
+- When schema is unchanged, category/source-bucket metadata should be stored in `inventory_notes` or `input_videos.manual_notes`
 - Never fabricate video titles or dates
 
 # Failure handling

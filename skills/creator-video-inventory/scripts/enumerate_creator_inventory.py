@@ -43,6 +43,18 @@ CREATOR_INVENTORY_HEADERS = [
     "queued_for_ingest",
 ]
 
+
+def merge_note_tokens(*values: str) -> str:
+    seen: list[str] = []
+    for value in values:
+        text = clean_text(value)
+        if not text:
+            continue
+        for token in [part.strip() for part in text.split(";")]:
+            if token and token not in seen:
+                seen.append(token)
+    return "; ".join(seen)
+
 PLAYWRIGHT_NODE_MODULES = PROJECT_ROOT / ".tmp" / "playwright-runner" / "node_modules"
 PLAYWRIGHT_ENUMERATOR = (
     PROJECT_ROOT / "skills" / "creator-video-inventory" / "scripts" / "playwright_creator_inventory.cjs"
@@ -119,9 +131,13 @@ def run_playwright_inventory(
     cookies_file: str = "",
     scroll_rounds: int = 12,
     wait_ms: int = 1800,
+    category_title: str = "",
+    category_index: int | None = None,
 ) -> dict[str, Any]:
     output_json = PROJECT_ROOT / "data" / "cache" / "creator_inventory_latest.json"
     output_json.parent.mkdir(parents=True, exist_ok=True)
+    if output_json.exists():
+        output_json.unlink()
     env = os.environ.copy()
     env["NODE_PATH"] = str(PLAYWRIGHT_NODE_MODULES)
     command = [
@@ -138,6 +154,10 @@ def run_playwright_inventory(
     ]
     if cookies_file:
         command.extend(["--cookies-file", cookies_file])
+    if clean_text(category_title):
+        command.extend(["--category-title", clean_text(category_title)])
+    if category_index is not None:
+        command.extend(["--category-index", str(category_index)])
     process = subprocess.run(
         command,
         cwd=PROJECT_ROOT,
@@ -197,6 +217,7 @@ def merge_creator_inventory(
     written_count = 0
     summary_creator_name = clean_text(result.get("creator_name", ""))
     summary_creator_home_url = clean_text(result.get("creator_home_url", ""))
+    source_bucket = clean_text(result.get("source_bucket", ""))
     input_count_before = len(input_rows)
     for record in result.get("records", []):
         video_id = clean_text(record.get("video_id", ""))
@@ -227,7 +248,10 @@ def merge_creator_inventory(
                     "status": "pending",
                     "language": "",
                     "target_field_scope": "",
-                    "manual_notes": "seeded from creator_video_inventory",
+                    "manual_notes": merge_note_tokens(
+                        "seeded from creator_video_inventory",
+                        f"source_bucket={source_bucket}" if source_bucket else "",
+                    ),
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -253,7 +277,10 @@ def merge_creator_inventory(
             "cover_text": clean_text(record.get("cover_text", "")),
             "source_rank": clean_text(record.get("source_rank", "")),
             "inventory_status": clean_text(record.get("inventory_status", "")) or "discovered",
-            "inventory_notes": clean_text(record.get("inventory_notes", "")),
+            "inventory_notes": merge_note_tokens(
+                record.get("inventory_notes", ""),
+                f"source_bucket={source_bucket}" if source_bucket else "",
+            ),
             "created_at": existing.get("created_at", "") or now,
             "updated_at": now,
             "queued_for_ingest": queued_for_ingest,
@@ -285,6 +312,9 @@ def merge_creator_inventory(
         "creator_home_url": summary_creator_home_url or result.get("creator_home_url", ""),
         "creator_id": result.get("creator_id", ""),
         "creator_name": summary_creator_name or result.get("creator_name", ""),
+        "source_bucket": source_bucket,
+        "selection_mode": clean_text(result.get("selection_mode", "")),
+        "available_tabs": result.get("available_tabs", []),
         "discovered_count": result.get("discovered_count", 0),
         "deduped_count": result.get("deduped_count", 0),
         "written_inventory_count": written_count,
@@ -303,6 +333,8 @@ def main() -> int:
     parser.add_argument("--cookies-file", default="", help="Optional Netscape cookies file passed to Playwright.")
     parser.add_argument("--scroll-rounds", type=int, default=12)
     parser.add_argument("--wait-ms", type=int, default=1800)
+    parser.add_argument("--category-title", default="", help="Optional visible category/tab title to click before enumeration.")
+    parser.add_argument("--category-index", type=int, default=None, help="Optional visible category/tab index to click before enumeration.")
     parser.add_argument("--append-to-input", action="store_true", help="Append unseen video urls into input_videos.")
     args = parser.parse_args()
 
@@ -317,6 +349,8 @@ def main() -> int:
         cookies_file=args.cookies_file,
         scroll_rounds=args.scroll_rounds,
         wait_ms=args.wait_ms,
+        category_title=args.category_title,
+        category_index=args.category_index,
     )
     summary = merge_creator_inventory(
         workbook_path,

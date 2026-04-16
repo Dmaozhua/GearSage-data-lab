@@ -17,10 +17,10 @@ from shared.reel_pipeline import WORKBOOK_DEFAULT, print_json
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a batch biased toward parameter-explicit creator inventory candidates.")
+    parser = argparse.ArgumentParser(description="Run a batch biased toward hard parameter-explicit creator inventory candidates.")
     parser.add_argument("--workbook", default=str(WORKBOOK_DEFAULT))
-    parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument("--min-equipment-score", type=int, default=10)
+    parser.add_argument("--limit", type=int, default=15)
+    parser.add_argument("--min-equipment-score", type=int, default=8)
     parser.add_argument("--cookies-file", default="")
     parser.add_argument("--cookies-from-browser", default="")
     parser.add_argument("--timeout-seconds", type=int, default=90)
@@ -46,7 +46,7 @@ def main() -> int:
         page_fallback=args.page_fallback,
         ocr_fallback=args.ocr_fallback,
     )
-    batch_summary["selection_mode"] = "parameter_score"
+    batch_summary["selection_mode"] = "hard_param_score"
     batch_summary["selected_limit"] = args.limit
     batch_summary["min_equipment_score"] = args.min_equipment_score
     batch_summary["selected_tasks"] = [
@@ -57,6 +57,7 @@ def main() -> int:
             "publish_date": row.get("publish_date", ""),
             "equipment_score": row.get("equipment_score", ""),
             "parameter_score": row.get("parameter_score", ""),
+            "hard_param_score": row.get("hard_param_score", ""),
             "matched_keywords": row.get("matched_keywords", ""),
         }
         for row in selected_rows

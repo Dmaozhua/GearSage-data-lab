@@ -71,3 +71,6 @@ Output:
 
 # Notes
 This skill builds the evidence layer. It does not extract reel parameters.
+
+Related references:
+- `skills/video-link-ingest/references/image-parameter-ocr-validation.md`

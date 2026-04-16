@@ -16,6 +16,10 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function hasFlag(name) {
+  return process.argv.includes(name);
+}
+
 function parseNetscapeCookies(filePath) {
   if (!filePath || !fs.existsSync(filePath)) {
     return [];
@@ -71,7 +75,7 @@ function normalizeDesc(value) {
   return cleanText(String(value || '').replace(/#\S+/g, ' '));
 }
 
-function buildNetworkRecord(aweme, fallbackCreator) {
+function buildNetworkRecord(aweme, fallbackCreator, sourceBucket = '') {
   const videoId = cleanText(aweme && aweme.aweme_id);
   if (!videoId) return null;
   const desc = cleanText(aweme && aweme.desc);
@@ -85,9 +89,9 @@ function buildNetworkRecord(aweme, fallbackCreator) {
     title_detected: desc,
     publish_date: epochToDate(aweme && aweme.create_time),
     cover_text: normalizeDesc(desc),
-    source_rank: 'network_aweme_post',
+    source_rank: sourceBucket ? 'network_aweme_post_bucket' : 'network_aweme_post',
     inventory_status: 'discovered',
-    inventory_notes: '',
+    inventory_notes: sourceBucket ? `source_bucket=${sourceBucket}` : '',
   };
 }
 
@@ -149,12 +153,285 @@ async function collectEmbeddedVideoUrls(page) {
   });
 }
 
+function buildCreatorPostUrl(creatorId, maxCursor = 0, count = 18) {
+  return `https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383&channel=channel_pc_web&sec_user_id=${encodeURIComponent(
+    creatorId
+  )}&max_cursor=${encodeURIComponent(String(maxCursor))}&count=${encodeURIComponent(String(count))}`;
+}
+
+function buildMixAwemeUrl(mixId, cursor = 0, count = 20) {
+  return `https://www.douyin.com/aweme/v1/web/mix/aweme/?mix_id=${encodeURIComponent(
+    mixId
+  )}&cursor=${encodeURIComponent(String(cursor))}&count=${encodeURIComponent(String(count))}&device_platform=webapp&aid=6383&channel=channel_pc_web`;
+}
+
+function normalizeBucketName(value) {
+  return cleanText(String(value || '').replace(/^合集\s*[·\-:：]?\s*/u, ''));
+}
+
+async function fetchJsonInPage(page, requestUrl) {
+  const rawText = await page.evaluate(async (url) => {
+    const response = await fetch(url, { credentials: 'include' });
+    return await response.text();
+  }, requestUrl);
+  const normalizedText = cleanText(rawText);
+  if (!normalizedText || normalizedText === '{"status_code":0}') {
+    return null;
+  }
+  return JSON.parse(rawText);
+}
+
+async function fetchProfilePayload(page, creatorId, notes) {
+  if (!creatorId) {
+    return null;
+  }
+  try {
+    return await fetchJsonInPage(
+      page,
+      `https://www.douyin.com/aweme/v1/web/user/profile/other/?sec_user_id=${encodeURIComponent(
+        creatorId
+      )}&device_platform=webapp&aid=6383&channel=channel_pc_web`
+    );
+  } catch (error) {
+    notes.push(`profile fetch failed: ${cleanText(error && error.message ? error.message : String(error))}`);
+    return null;
+  }
+}
+
+function collectBucketCandidates(awemeList) {
+  const buckets = new Map();
+  for (const aweme of awemeList) {
+    const mixInfo = aweme && aweme.mix_info ? aweme.mix_info : null;
+    const seriesInfo = aweme && aweme.series_info ? aweme.series_info : null;
+    const mixId = cleanText((mixInfo && mixInfo.mix_id) || (seriesInfo && seriesInfo.series_id));
+    const bucketName = normalizeBucketName(
+      (mixInfo && mixInfo.mix_name) || (seriesInfo && seriesInfo.series_name) || ''
+    );
+    if (!mixId || !bucketName) continue;
+    const existing = buckets.get(mixId) || {
+      bucket_id: mixId,
+      bucket_name: bucketName,
+      bucket_kind: mixInfo ? 'mix' : 'series',
+      video_hint_count: 0,
+    };
+    const mixStats = mixInfo && mixInfo.statis ? mixInfo.statis : {};
+    const seriesStats = seriesInfo && seriesInfo.stats ? seriesInfo.stats : {};
+    existing.video_hint_count = Math.max(
+      Number(existing.video_hint_count || 0),
+      Number(mixStats.updated_to_episode || 0),
+      Number(seriesStats.updated_to_episode || 0),
+      Number(seriesStats.total_episode || 0)
+    );
+    buckets.set(mixId, existing);
+  }
+  return Array.from(buckets.values()).sort(
+    (a, b) => (Number(b.video_hint_count || 0) - Number(a.video_hint_count || 0)) || a.bucket_name.localeCompare(b.bucket_name)
+  );
+}
+
+function selectBucketCandidate(bucketCandidates, categoryTitle, categoryIndex) {
+  if (!categoryTitle && categoryIndex < 0) {
+    return null;
+  }
+  if (categoryTitle) {
+    const target = cleanText(categoryTitle);
+    return (
+      bucketCandidates.find((item) => cleanText(item.bucket_name) === target) ||
+      bucketCandidates.find((item) => cleanText(item.bucket_name).includes(target))
+    );
+  }
+  if (categoryIndex >= 0 && categoryIndex < bucketCandidates.length) {
+    return bucketCandidates[categoryIndex];
+  }
+  return null;
+}
+
+async function fetchCreatorBucketInventory(page, creatorId, fallbackCreator, notes) {
+  const awemeList = [];
+  let cursor = 0;
+  let hasMore = true;
+  let rounds = 0;
+  const limit = 24;
+  while (hasMore && rounds < limit) {
+    const payload = await fetchJsonInPage(page, buildCreatorPostUrl(creatorId, cursor, 18)).catch((error) => {
+      notes.push(`creator aweme/post fetch failed: ${cleanText(error && error.message ? error.message : String(error))}`);
+      return null;
+    });
+    if (!payload) {
+      break;
+    }
+    const pageAwemeList = Array.isArray(payload.aweme_list) ? payload.aweme_list : [];
+    awemeList.push(...pageAwemeList);
+    hasMore = Number(payload.has_more || 0) === 1;
+    cursor = Number(payload.max_cursor || 0);
+    rounds += 1;
+    if (!pageAwemeList.length) {
+      break;
+    }
+  }
+  if (rounds) {
+    notes.push(`captured ${rounds} creator aweme/post api page(s) for bucket discovery`);
+  }
+  return {
+    awemeList,
+    bucketCandidates: collectBucketCandidates(awemeList),
+  };
+}
+
+async function fetchMixInventory(page, mixId, sourceBucket, fallbackCreator, notes) {
+  const inventoryMap = new Map();
+  let cursor = 0;
+  let hasMore = true;
+  let rounds = 0;
+  const limit = 24;
+  while (hasMore && rounds < limit) {
+    const payload = await fetchJsonInPage(page, buildMixAwemeUrl(mixId, cursor, 20)).catch((error) => {
+      notes.push(`mix aweme fetch failed: ${cleanText(error && error.message ? error.message : String(error))}`);
+      return null;
+    });
+    if (!payload) {
+      break;
+    }
+    const awemeList = Array.isArray(payload.aweme_list) ? payload.aweme_list : [];
+    for (const aweme of awemeList) {
+      const record = buildNetworkRecord(aweme, fallbackCreator, sourceBucket);
+      if (!record) continue;
+      record.source_rank = 'api_mix_aweme_bucket';
+      record.inventory_notes = cleanText(record.inventory_notes || `source_bucket=${sourceBucket}`);
+      inventoryMap.set(record.video_id || record.video_url, record);
+    }
+    hasMore = Number(payload.has_more || 0) === 1;
+    cursor = Number(payload.cursor || payload.max_cursor || 0);
+    rounds += 1;
+    if (!awemeList.length) {
+      break;
+    }
+  }
+  notes.push(`captured ${rounds} mix/aweme api page(s) for bucket ${sourceBucket}`);
+  if (!hasMore) {
+    notes.push('stopped because mix has_more=false');
+  } else if (rounds >= limit) {
+    notes.push(`stopped because mix continuation limit ${limit} was reached`);
+  }
+  return Array.from(inventoryMap.values());
+}
+
+async function collectTabCandidates(page) {
+  const candidates = await page
+    .locator('button, [role="tab"], [role="button"], a, div, span')
+    .evaluateAll((nodes) =>
+      nodes
+        .map((node, locatorIndex) => {
+          const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+          const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+          const className = typeof node.className === 'string' ? node.className : '';
+          const dataset = node.dataset ? JSON.stringify(node.dataset) : '';
+          return {
+            locatorIndex,
+            text,
+            role: node.getAttribute('role') || '',
+            ariaSelected: node.getAttribute('aria-selected') || '',
+            className,
+            dataset,
+            top: rect ? Math.round(rect.top) : 0,
+            left: rect ? Math.round(rect.left) : 0,
+            width: rect ? Math.round(rect.width) : 0,
+            height: rect ? Math.round(rect.height) : 0,
+          };
+        })
+        .filter((item) => item.text)
+        .filter((item) => item.text.length <= 32)
+        .filter((item) => item.width >= 30 && item.height >= 16)
+        .filter((item) => item.top >= 0 && item.top <= 1200)
+        .filter(
+          (item) =>
+            item.role === 'tab' ||
+            item.ariaSelected ||
+            /tab|tabs|switch|label|title|nav/i.test(item.className) ||
+            /tab|tabs|switch|label|title/i.test(item.dataset)
+        )
+    );
+
+  const deduped = new Map();
+  for (const candidate of candidates) {
+    const key = candidate.text;
+    const existing = deduped.get(key);
+    if (!existing || candidate.top < existing.top || (candidate.top === existing.top && candidate.left < existing.left)) {
+      deduped.set(key, candidate);
+    }
+  }
+  return Array.from(deduped.values()).sort((a, b) => (a.top - b.top) || (a.left - b.left));
+}
+
+async function selectCategoryTab(page, categoryTitle, categoryIndex, waitMs, notes) {
+  const availableTabs = await collectTabCandidates(page);
+  if (availableTabs.length) {
+    notes.push(`available_tabs=${availableTabs.map((item) => item.text).join(' | ')}`);
+  } else {
+    notes.push('available_tabs=none_detected');
+  }
+
+  if (!categoryTitle && categoryIndex < 0) {
+    return {
+      selectedBucket: '',
+      availableTabs,
+      selectionMode: 'default_record_tab',
+    };
+  }
+
+  let selected = null;
+  if (categoryTitle) {
+    const target = cleanText(categoryTitle);
+    selected =
+      availableTabs.find((item) => cleanText(item.text) === target) ||
+      availableTabs.find((item) => cleanText(item.text).includes(target));
+  } else if (categoryIndex >= 0 && categoryIndex < availableTabs.length) {
+    selected = availableTabs[categoryIndex];
+  }
+
+  if (!selected) {
+    notes.push(
+      categoryTitle
+        ? `category_title_not_found=${cleanText(categoryTitle)}`
+        : `category_index_not_found=${String(categoryIndex)}`
+    );
+    return {
+      selectedBucket: categoryTitle ? cleanText(categoryTitle) : `tab_index_${String(categoryIndex)}`,
+      availableTabs,
+      selectionMode: categoryTitle ? 'category_title_missing' : 'category_index_missing',
+      clicked: false,
+    };
+  }
+
+  const locator = page.locator('button, [role="tab"], [role="button"], a, div, span').nth(selected.locatorIndex);
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await locator.click({ force: true }).catch(async () => {
+    await page.mouse.click(selected.left + Math.max(8, Math.round(selected.width / 2)), selected.top + Math.max(8, Math.round(selected.height / 2)));
+  });
+  await page.waitForTimeout(Math.max(waitMs, 1200));
+
+  notes.push(
+    categoryTitle
+      ? `selected_category_title=${selected.text}`
+      : `selected_category_index=${String(categoryIndex)}:${selected.text}`
+  );
+  return {
+    selectedBucket: selected.text,
+    availableTabs,
+    selectionMode: categoryTitle ? 'category_title' : 'category_index',
+    clicked: true,
+  };
+}
+
 async function run() {
   const url = argValue('--url');
   const outputJson = argValue('--output-json');
   const scrollRounds = Number(argValue('--scroll-rounds', '12'));
   const waitMs = Number(argValue('--wait-ms', '1800'));
   const cookiesFile = argValue('--cookies-file');
+  const categoryTitle = cleanText(argValue('--category-title'));
+  const categoryIndexRaw = argValue('--category-index', '');
+  const categoryIndex = categoryIndexRaw === '' ? -1 : Number(categoryIndexRaw);
   if (!url) {
     throw new Error('Missing --url');
   }
@@ -176,9 +453,14 @@ async function run() {
   let lastSuccessfulPageUrl = '';
   let lastPayloadHasMore = 0;
   let lastPayloadMaxCursor = 0;
+  let captureEnabled = false;
+  let sourceBucket = '';
 
   page.on('response', (response) => {
     responseTasks.push((async () => {
+      if (!captureEnabled) {
+        return;
+      }
       const responseUrl = response.url();
       if (!responseUrl.includes('/aweme/v1/web/aweme/post/')) {
         return;
@@ -204,7 +486,7 @@ async function run() {
             creator_id: creatorId,
             creator_name: creatorName,
             creator_home_url: creatorHomeUrl || page.url(),
-          });
+          }, sourceBucket);
           if (!record) continue;
           inventoryMap.set(record.video_id || record.video_url, record);
         }
@@ -235,10 +517,22 @@ async function run() {
   }
 
   creatorId = parseCreatorId(creatorHomeUrl || page.url());
+  const profilePayload = await fetchProfilePayload(page, creatorId, notes);
+  const profileUser = profilePayload && profilePayload.user ? profilePayload.user : {};
   const bodyInitial = await page.locator('body').innerText().catch(() => '');
   const initialText = cleanText(bodyInitial);
   const nameMatch = bodyInitial.match(/\n([^\n]{1,30})\n关注\n(?:\d+|粉丝)/);
-  creatorName = nameMatch ? cleanText(nameMatch[1]) : cleanText((await page.title()).replace(/的抖音\s*-\s*抖音$/, ''));
+  creatorName =
+    cleanText(profileUser.nickname) ||
+    (nameMatch ? cleanText(nameMatch[1]) : cleanText((await page.title()).replace(/的抖音\s*-\s*抖音$/, '')));
+
+  if (profilePayload) {
+    const mixCount = Number(profileUser.mix_count || 0);
+    const seriesCount = Number(profileUser.series_count || 0);
+    if (mixCount || seriesCount) {
+      notes.push(`profile mix_count=${String(mixCount)} series_count=${String(seriesCount)}`);
+    }
+  }
 
   if (initialText.includes('服务异常')) {
     notes.push('creator page shows service exception in works area');
@@ -246,6 +540,128 @@ async function run() {
   if (initialText.includes('验证码中间页')) {
     notes.push('creator page blocked by captcha');
   }
+
+  if (categoryTitle || categoryIndex >= 0) {
+    const discovery = await fetchCreatorBucketInventory(
+      page,
+      creatorId,
+      {
+        creator_id: creatorId,
+        creator_name: creatorName,
+        creator_home_url: creatorHomeUrl || page.url(),
+      },
+      notes
+    );
+    const bucketCandidates = discovery.bucketCandidates;
+    if (bucketCandidates.length) {
+      notes.push(
+        `available_tabs=${bucketCandidates
+          .map((item, index) => `${String(index)}:${item.bucket_name}(${String(item.video_hint_count || 0)})`)
+          .join(' | ')}`
+      );
+    } else {
+      notes.push('available_tabs=none_detected');
+    }
+
+    const selectedBucket = selectBucketCandidate(bucketCandidates, categoryTitle, categoryIndex);
+    sourceBucket =
+      (selectedBucket && cleanText(selectedBucket.bucket_name)) ||
+      (categoryTitle ? categoryTitle : categoryIndex >= 0 ? `tab_index_${String(categoryIndex)}` : 'record');
+    const selectionMode = categoryTitle ? 'category_title' : 'category_index';
+    if (!selectedBucket) {
+      notes.push(
+        categoryTitle
+          ? `category_title_not_found=${cleanText(categoryTitle)}`
+          : `category_index_not_found=${String(categoryIndex)}`
+      );
+      const emptyResult = {
+        input_url: url,
+        final_url: page.url(),
+        creator_home_url: creatorHomeUrl || page.url(),
+        creator_id: creatorId,
+        creator_name: creatorName,
+        source_bucket: sourceBucket,
+        selection_mode: `${selectionMode}_missing`,
+        available_tabs: bucketCandidates.map((item) => item.bucket_name),
+        discovered_count: 0,
+        deduped_count: 0,
+        notes,
+        records: [],
+      };
+      if (outputJson) {
+        fs.writeFileSync(outputJson, JSON.stringify(emptyResult, null, 2), 'utf8');
+      }
+      process.stdout.write(JSON.stringify(emptyResult, null, 2));
+      await context.close();
+      await browser.close();
+      return;
+    }
+
+    notes.push(
+      categoryTitle
+        ? `selected_category_title=${selectedBucket.bucket_name}`
+        : `selected_category_index=${String(categoryIndex)}:${selectedBucket.bucket_name}`
+    );
+    const bucketRecords = await fetchMixInventory(
+      page,
+      selectedBucket.bucket_id,
+      selectedBucket.bucket_name,
+      {
+        creator_id: creatorId,
+        creator_name: creatorName,
+        creator_home_url: creatorHomeUrl || page.url(),
+      },
+      notes
+    );
+    const records = bucketRecords
+      .map((item) => ({
+        creator_id: cleanText(item.creator_id || creatorId),
+        creator_name: cleanText(item.creator_name || creatorName),
+        creator_home_url: cleanText(item.creator_home_url || creatorHomeUrl || page.url()),
+        video_id: cleanText(item.video_id),
+        video_url: cleanText(item.video_url),
+        title_detected: cleanText(item.title_detected),
+        publish_date: cleanText(item.publish_date),
+        cover_text: cleanText(item.cover_text),
+        source_rank: cleanText(item.source_rank),
+        inventory_status: cleanText(item.inventory_status || (item.video_url ? 'discovered' : 'partial')),
+        inventory_notes: cleanText(item.inventory_notes || `source_bucket=${selectedBucket.bucket_name}`),
+      }))
+      .sort((a, b) => String(a.video_id || a.video_url).localeCompare(String(b.video_id || b.video_url)));
+    const result = {
+      input_url: url,
+      final_url: page.url(),
+      creator_home_url: creatorHomeUrl || page.url(),
+      creator_id: creatorId,
+      creator_name: creatorName,
+      source_bucket: selectedBucket.bucket_name,
+      selection_mode: selectionMode,
+      available_tabs: bucketCandidates.map((item) => item.bucket_name),
+      discovered_count: records.length,
+      deduped_count: records.length,
+      notes,
+      records,
+    };
+    if (outputJson) {
+      fs.writeFileSync(outputJson, JSON.stringify(result, null, 2), 'utf8');
+    }
+    process.stdout.write(JSON.stringify(result, null, 2));
+    await context.close();
+    await browser.close();
+    return;
+  }
+
+  const tabSelection = await selectCategoryTab(page, categoryTitle, categoryIndex, waitMs, notes);
+  sourceBucket = cleanText(tabSelection.selectedBucket) || (categoryTitle ? categoryTitle : (categoryIndex >= 0 ? `tab_index_${String(categoryIndex)}` : 'record'));
+  inventoryMap.clear();
+  networkPageCursorSeen.clear();
+  responseTasks.length = 0;
+  networkPageCount = 0;
+  lastSuccessfulPageUrl = '';
+  lastPayloadHasMore = 0;
+  lastPayloadMaxCursor = 0;
+  captureEnabled = true;
+
   for (let round = 0; round < scrollRounds; round += 1) {
     await page.mouse.wheel(0, 1800);
     await page.waitForTimeout(waitMs);
@@ -283,16 +699,16 @@ async function run() {
       break;
     }
 
-    const awemeList = Array.isArray(payload.aweme_list) ? payload.aweme_list : [];
-    for (const aweme of awemeList) {
-      const record = buildNetworkRecord(aweme, {
-        creator_id: creatorId,
-        creator_name: creatorName,
-        creator_home_url: creatorHomeUrl || page.url(),
-      });
-      if (!record) continue;
-      inventoryMap.set(record.video_id || record.video_url, record);
-    }
+      const awemeList = Array.isArray(payload.aweme_list) ? payload.aweme_list : [];
+      for (const aweme of awemeList) {
+        const record = buildNetworkRecord(aweme, {
+          creator_id: creatorId,
+          creator_name: creatorName,
+          creator_home_url: creatorHomeUrl || page.url(),
+        }, sourceBucket);
+        if (!record) continue;
+        inventoryMap.set(record.video_id || record.video_url, record);
+      }
 
     continuationRounds += 1;
     if (inventoryMap.size === beforeCount) {
@@ -343,7 +759,7 @@ async function run() {
       cover_text: cleanText(item.cover_text),
       source_rank: cleanText(item.source_rank),
       inventory_status: cleanText(item.inventory_status || (item.video_url ? 'discovered' : 'partial')),
-      inventory_notes: cleanText(item.inventory_notes),
+      inventory_notes: cleanText(item.inventory_notes || (sourceBucket ? `source_bucket=${sourceBucket}` : '')),
     }))
     .sort((a, b) => String(a.video_id || a.video_url).localeCompare(String(b.video_id || b.video_url)));
 
@@ -353,6 +769,9 @@ async function run() {
     creator_home_url: creatorHomeUrl || page.url(),
     creator_id: creatorId,
     creator_name: creatorName,
+    source_bucket: sourceBucket,
+    selection_mode: tabSelection.selectionMode,
+    available_tabs: tabSelection.availableTabs ? tabSelection.availableTabs.map((item) => item.text) : [],
     discovered_count: records.length,
     deduped_count: records.length,
     notes,

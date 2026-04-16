@@ -19,10 +19,10 @@ EQUIPMENT_POSITIVE_KEYWORDS = {
     "渔轮": 5,
     "水滴轮": 5,
     "纺车轮": 5,
-    "轮子": 4,
+    "轮子": 5,
     "BFS": 4,
-    "对比": 3,
-    "拆解": 4,
+    "对比": 5,
+    "拆解": 3,
     "参数": 4,
     "介绍": 2,
     "Abu": 4,
@@ -39,6 +39,13 @@ EQUIPMENT_POSITIVE_KEYWORDS = {
     "CURADO": 4,
     "BLACK 10": 5,
     "BF8": 5,
+    "详细": 3,
+    "教程": 3,
+    "新款": 5,
+    "入门": 5,
+    "磁力": 5,
+    "离心": 5,
+    "DC": 5,
 }
 
 PARAMETER_POSITIVE_KEYWORDS = {
@@ -60,6 +67,29 @@ PARAMETER_POSITIVE_KEYWORDS = {
     "轴承": 4,
     "mm": 4,
     "g": 3,
+    "kg": 3,
+    "cm": 2,
+    "lb": 2,
+    "号": 1,
+}
+
+HARD_PARAM_POSITIVE_KEYWORDS = {
+    "线杯": 2,
+    "杯径": 2,
+    "直径": 2,
+    "大齿": 2,
+    "小齿": 2,
+    "长轴": 2,
+    "短轴": 2,
+    "速比": 2,
+    "卸力": 2,
+    "摇臂": 2,
+    "轴承": 2,
+    "黄铜": 3,
+    "铝合金": 3,
+    "结构": 2,
+    "mm": 3,
+    "g": 2,
     "kg": 3,
     "cm": 2,
     "lb": 2,
@@ -100,6 +130,61 @@ PARAMETER_REGEX_PATTERNS = [
     (r"(?:长轴|短轴)", 5, "轴型词"),
 ]
 
+HARD_PARAM_REGEX_PATTERNS = [
+    (r"\b\d+(?:\.\d+)?\s*mm\b", 10, "单位:mm"),
+    (r"\b\d+(?:\.\d+)?\s*g\b", 8, "单位:g"),
+    (r"\b\d+(?:\.\d+)?\s*kg\b", 9, "单位:kg"),
+    (r"\b\d+(?:\.\d+)?\s*cm\b", 7, "单位:cm"),
+    (r"\b\d+(?:\.\d+)?\s*lb\b", 7, "单位:lb"),
+    (r"\b\d+(?:\.\d+)?\s*号\b", 6, "单位:号"),
+    (r"\b\d+\+\d+\b", 8, "数字句式:7+1"),
+    (r"\b\d+(?:\.\d+)?\s*:\s*1\b", 9, "数字句式:速比"),
+    (r"(?:线杯|杯径|直径)\s*\d+(?:\.\d+)?\s*mm", 12, "数字句式:线杯直径"),
+    (r"(?:摇臂)\s*\d+(?:\.\d+)?\s*mm", 10, "数字句式:摇臂"),
+    (r"(?:最大)?卸力\s*\d+(?:\.\d+)?\s*(?:kg|lb)", 12, "数字句式:卸力"),
+    (r"(?:主齿|大齿|小齿)\s*(?:为|材质为|采用)\s*(?:黄铜|铝合金|锌合金|钢|不锈钢|钛合金)", 12, "材料句式:齿材"),
+    (r"三大件\s*(?:为|材质为|采用)\s*(?:铝合金|镁合金|碳纤维|黄铜|钢|不锈钢)", 12, "材料句式:三大件"),
+    (r"(?:为黄铜|为铝合金|采用[^，。]{0,10}结构)", 9, "材料/结构句式"),
+    (r"(?:长轴|短轴)", 6, "结构词:轴型"),
+]
+
+PROBE_KEYWORDS = {
+    "线杯直径": 12,
+    "杯径": 10,
+    "直径": 8,
+    "大齿": 8,
+    "小齿": 8,
+    "摇臂": 7,
+    "卸力": 8,
+    "速比": 8,
+    "轴承": 7,
+    "黄铜": 9,
+    "铝合金": 9,
+    "镁合金": 9,
+    "长轴": 8,
+    "短轴": 8,
+}
+
+PROBE_REGEX_PATTERNS = [
+    (r"\b\d+(?:\.\d+)?\s*mm\b", 12, "单位:mm"),
+    (r"\b\d+(?:\.\d+)?\s*g\b", 10, "单位:g"),
+    (r"\b\d+(?:\.\d+)?\s*kg\b", 11, "单位:kg"),
+    (r"\b\d+(?:\.\d+)?\s*cm\b", 8, "单位:cm"),
+    (r"\b\d+(?:\.\d+)?\s*lb\b", 8, "单位:lb"),
+    (r"\b\d+(?:\.\d+)?\s*号\b", 7, "单位:号"),
+    (r"\b\d+\+\d+\b", 11, "数字句式:7+1"),
+    (r"\b\d+(?:\.\d+)?\s*:\s*1\b", 12, "数字句式:速比"),
+    (r"(?:线杯|杯径|直径)\s*\d+(?:\.\d+)?\s*mm", 14, "数字句式:线杯直径"),
+    (r"(?:摇臂)\s*\d+(?:\.\d+)?\s*mm", 12, "数字句式:摇臂"),
+    (r"(?:最大)?卸力\s*\d+(?:\.\d+)?\s*(?:kg|lb)", 14, "数字句式:卸力"),
+    (r"\d+\+\d+\s*轴承", 13, "数字句式:轴承配置"),
+    (r"速比\s*\d+(?:\.\d+)?\s*:\s*1", 13, "参数句式:速比"),
+    (r"(?:主齿|大齿|小齿)\s*(?:为|材质为|采用)\s*(?:黄铜|铝合金|锌合金|钢|不锈钢|钛合金)", 15, "材料句式:齿材"),
+    (r"三大件\s*(?:为|材质为|采用)\s*(?:铝合金|镁合金|碳纤维|黄铜|钢|不锈钢)", 15, "材料句式:三大件"),
+    (r"(?:采用[^，。]{0,10}结构)", 10, "结构句式"),
+    (r"(?:长轴|短轴)", 8, "结构词:轴型"),
+]
+
 
 def parse_video_id(value: str) -> str:
     text = clean_text(value)
@@ -118,11 +203,12 @@ def parse_video_id(value: str) -> str:
     return ""
 
 
-def score_text(title_detected: str, cover_text: str) -> tuple[int, int, list[str]]:
+def score_text(title_detected: str, cover_text: str) -> tuple[int, int, int, list[str]]:
     text = " ".join([clean_text(title_detected), clean_text(cover_text)])
     lowered = text.lower()
     equipment_score = 0
     parameter_score = 0
+    hard_param_score = 0
     matched_keywords: list[str] = []
     for keyword, weight in EQUIPMENT_POSITIVE_KEYWORDS.items():
         if keyword.lower() in lowered:
@@ -144,7 +230,50 @@ def score_text(title_detected: str, cover_text: str) -> tuple[int, int, list[str
         if re.search(pattern, text, re.I):
             parameter_score += weight
             matched_keywords.append(f"param:{label}")
-    return equipment_score, parameter_score, matched_keywords
+    for keyword, weight in HARD_PARAM_POSITIVE_KEYWORDS.items():
+        if keyword.lower() in lowered:
+            hard_param_score += weight
+            matched_keywords.append(f"hard:{keyword}")
+    for pattern, weight, label in HARD_PARAM_REGEX_PATTERNS:
+        if re.search(pattern, text, re.I):
+            hard_param_score += weight
+            matched_keywords.append(f"hard:{label}")
+    return equipment_score, parameter_score, hard_param_score, matched_keywords
+
+
+def extract_probe_ocr_blocks(page_text: str, limit: int = 2) -> list[str]:
+    text = page_text or ""
+    matches = re.findall(r"\[OCR:[^\]]+\]\s*(.*?)(?=(?:\n\[OCR:)|\Z)", text, flags=re.S)
+    blocks: list[str] = []
+    for match in matches[:limit]:
+        cleaned = clean_text(match)
+        if cleaned:
+            blocks.append(cleaned)
+    return blocks
+
+
+def build_probe_text(description_text: str, page_text: str) -> str:
+    description = clean_text(description_text)
+    page = clean_text((page_text or "")[:1200])
+    ocr_blocks = extract_probe_ocr_blocks(page_text, limit=2)
+    parts = [part for part in [description, page, *ocr_blocks] if part]
+    return "\n".join(parts)
+
+
+def score_probe_text(description_text: str, page_text: str) -> tuple[int, list[str]]:
+    text = build_probe_text(description_text, page_text)
+    lowered = text.lower()
+    probe_score = 0
+    matched_signals: list[str] = []
+    for keyword, weight in PROBE_KEYWORDS.items():
+        if keyword.lower() in lowered:
+            probe_score += weight
+            matched_signals.append(keyword)
+    for pattern, weight, label in PROBE_REGEX_PATTERNS:
+        if re.search(pattern, text, re.I):
+            probe_score += weight
+            matched_signals.append(label)
+    return probe_score, matched_signals
 
 
 def load_scored_inventory_candidates(
@@ -171,7 +300,7 @@ def load_scored_inventory_candidates(
         status = clean_text(input_row.get("status", "")).lower()
         if pending_only and status != "pending":
             continue
-        equipment_score, parameter_score, matched_keywords = score_text(
+        equipment_score, parameter_score, hard_param_score, matched_keywords = score_text(
             inventory_row.get("title_detected", ""),
             inventory_row.get("cover_text", ""),
         )
@@ -184,6 +313,7 @@ def load_scored_inventory_candidates(
                 "publish_date": clean_text(inventory_row.get("publish_date", "")),
                 "equipment_score": str(equipment_score),
                 "parameter_score": str(parameter_score),
+                "hard_param_score": str(hard_param_score),
                 "matched_keywords": ", ".join(matched_keywords),
                 "status": status,
             }
@@ -191,6 +321,7 @@ def load_scored_inventory_candidates(
 
     scored_rows.sort(
         key=lambda row: (
+            int(row.get("hard_param_score", "0") or "0"),
             int(row.get("parameter_score", "0") or "0"),
             int(row.get("equipment_score", "0") or "0"),
             row.get("publish_date", ""),

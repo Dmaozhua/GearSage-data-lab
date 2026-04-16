@@ -23,6 +23,8 @@ PLAYWRIGHT_CAPTURE_SCRIPT = (
     PROJECT_ROOT / "skills" / "video-link-ingest" / "scripts" / "playwright_page_capture.cjs"
 )
 OCR_SCREENSHOT_SCRIPT = PROJECT_ROOT / "skills" / "video-link-ingest" / "scripts" / "ocr_screenshots.swift"
+ANSI_ESCAPE_REGEX = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+INVALID_XML_CHAR_REGEX = re.compile(r"[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD]")
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -416,6 +418,7 @@ def _set_inline_text(cell: ET.Element, value: str) -> None:
     cell.attrib["t"] = "inlineStr"
     is_node = ET.SubElement(cell, _main("is"))
     t_node = ET.SubElement(is_node, _main("t"))
+    value = sanitize_xml_text(value)
     if value[:1].isspace() or value[-1:].isspace() or "\n" in value:
         t_node.attrib[f"{{{XML_NS}}}space"] = "preserve"
     t_node.text = value
@@ -510,6 +513,12 @@ def to_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="ignore")
     return str(value)
+
+
+def sanitize_xml_text(value: Any) -> str:
+    text = to_text(value)
+    text = ANSI_ESCAPE_REGEX.sub("", text)
+    return INVALID_XML_CHAR_REGEX.sub("", text)
 
 
 def clean_text(value: Any) -> str:
@@ -687,6 +696,55 @@ def build_ocr_note(*, extracted: bool, char_count: int) -> str:
     return f"ocr:extracted={'yes' if extracted else 'no'}|char_count={char_count}"
 
 
+OCR_NOISE_MARKERS = [
+    "合集",
+    "播放中",
+    "推荐视频",
+    "全部评论",
+    "大家都在搜",
+    "扫码登录",
+    "验证码登录",
+    "登录后免费畅享高清视频",
+    "打开「抖音APP」",
+    "广告投放",
+    "点击加载更",
+]
+
+
+def stable_text_anchor(value: str, max_len: int = 20) -> str:
+    text = clean_text(value).replace("#", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len] if text else ""
+
+
+def trim_noise_lines(lines: list[str]) -> list[str]:
+    result: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if any(marker in line for marker in OCR_NOISE_MARKERS):
+            break
+        result.append(line)
+    return result
+
+
+def filter_capture_text(text: str, *, description_hint: str = "", title_hint: str = "") -> str:
+    lines = [clean_text(line) for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    anchors = [stable_text_anchor(description_hint), stable_text_anchor(title_hint)]
+    anchors = [anchor for anchor in anchors if anchor]
+    start_index = 0
+    for anchor in anchors:
+        found_index = next((idx for idx, line in enumerate(lines) if anchor in line), -1)
+        if found_index != -1:
+            start_index = max(0, found_index - 4)
+            break
+    trimmed = trim_noise_lines(lines[start_index : start_index + 40])
+    return clean_multiline_text("\n".join(trimmed))
+
+
 def page_fallback_status(payload: dict[str, str]) -> str:
     if clean_text(payload.get("transcript_text", "")):
         return "transcript_available"
@@ -712,7 +770,12 @@ def run_ocr_on_screenshots(screenshot_dir: str, timeout_seconds: int = 90) -> di
         return {"items": [], "combined_text": "", "char_count": 0, "notes": ["ocr screenshot directory missing"]}
     if not OCR_SCREENSHOT_SCRIPT.exists():
         return {"items": [], "combined_text": "", "char_count": 0, "notes": ["ocr screenshot script missing"]}
-    screenshot_paths = [str(path) for path in sorted(screenshot_root.glob("*.png"))]
+    preferred_paths = [
+        path
+        for path in sorted(screenshot_root.glob("*.png"))
+        if path.name.startswith("01_") or path.name.startswith("02_")
+    ]
+    screenshot_paths = [str(path) for path in (preferred_paths or sorted(screenshot_root.glob("*.png")))]
     if not screenshot_paths:
         return {"items": [], "combined_text": "", "char_count": 0, "notes": ["no screenshots found for ocr"]}
 
@@ -755,13 +818,28 @@ def run_ocr_on_screenshots(screenshot_dir: str, timeout_seconds: int = 90) -> di
         "items": items,
         "combined_text": combined_text,
         "char_count": total_chars,
-        "notes": [],
+        "notes": ["ocr_scope=first_two_screenshots" if preferred_paths else "ocr_scope=all_screenshots"],
     }
 
 
 def merge_ocr_capture(payload: dict[str, str], ocr_result: dict[str, Any], note_parts: list[str]) -> dict[str, str]:
-    combined_text = clean_multiline_text(ocr_result.get("combined_text", ""))
-    char_count = int(ocr_result.get("char_count", 0) or 0)
+    description_hint = clean_text(payload.get("description_text", ""))
+    title_hint = clean_text(payload.get("title_detected", ""))
+    filtered_sections: list[str] = []
+    total_chars = 0
+    for item in ocr_result.get("items", []):
+        item_path = Path(item.get("path", "")).name
+        text = filter_capture_text(
+            item.get("text", ""),
+            description_hint=description_hint,
+            title_hint=title_hint,
+        )
+        if not text:
+            continue
+        total_chars += len(text)
+        filtered_sections.append(f"[OCR_MAIN:{item_path}]\n{text}")
+    combined_text = clean_multiline_text("\n\n".join(filtered_sections))
+    char_count = total_chars
     if combined_text:
         existing_page_text = clean_multiline_text(payload.get("page_text", ""))
         payload["page_text"] = (
